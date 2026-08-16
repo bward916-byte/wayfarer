@@ -52,14 +52,17 @@ let LW=240, LH=135, SCALE=1, OX=0, OY=0, PORTRAIT=false;
 function resize(){
   const w = window.innerWidth, h = window.innerHeight;
   PORTRAIT = h > w;
-  LW = PORTRAIT?135:240; LH = PORTRAIT?240:135;   // 2x zoom vs v1
-  logical.width = LW; logical.height = LH;
   const dpr = Math.min(window.devicePixelRatio||1, 3);
   cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
   cv.style.width = w+'px'; cv.style.height = h+'px';
-  SCALE = Math.max(1, Math.floor(Math.min(cv.width/LW, cv.height/LH)));
-  OX = Math.floor((cv.width - LW*SCALE)/2);
-  OY = Math.floor((cv.height - LH*SCALE)/2);
+  /* integer scale from the short axis (~135 logical px = 2x zoom),
+     then expand the logical viewport to cover the whole screen —
+     no letterbox, no sprite resampling */
+  const shortPx = Math.min(cv.width, cv.height);
+  SCALE = Math.max(1, Math.floor(shortPx/135));
+  LW = Math.ceil(cv.width/SCALE); LH = Math.ceil(cv.height/SCALE);
+  logical.width = LW; logical.height = LH;
+  OX = 0; OY = 0;
   sc.imageSmoothingEnabled = false;
   g.imageSmoothingEnabled = false;
 }
@@ -428,7 +431,7 @@ function nearestWolfDist(){
 function updateHints(dt){
   if(activeHint){
     const s=activeHint; s.t+=dt;
-    if(s.h.sat(s)){ hintFlags[s.h.id]=true; s.leaving=0.5; }
+    if(s.leaving===undefined && s.h.sat(s)){ hintFlags[s.h.id]=true; s.leaving=0.5; }
     if(s.leaving!==undefined){ s.leaving-=dt; if(s.leaving<=0) activeHint=null; return; }
     if(s.t>B.HINT_GIVEUP_S){ activeHint=null; }
     return;
@@ -465,8 +468,12 @@ function toLogical(e){
   const dpr = cv.width/window.innerWidth;
   return {x:(e.clientX*dpr-OX)/SCALE, y:(e.clientY*dpr-OY)/SCALE};
 }
+let fsTried=false;
 cv.addEventListener('pointerdown',e=>{
   e.preventDefault(); cv.setPointerCapture(e.pointerId);
+  if(!fsTried){ fsTried=true;
+    try{ const el=document.documentElement;
+      if(el.requestFullscreen) el.requestFullscreen().catch(()=>{}); }catch(_){}}
   const p=toLogical(e);
   for(const k in buttons){const b=buttons[k];
     if(Math.hypot(p.x-b.x,p.y-b.y)<=b.r+5){ pressButton(k); return; }}
