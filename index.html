@@ -18,7 +18,11 @@
 <script>
 'use strict';
 /* ============================================================
-   WAYFARER — P1 v9 (spec v3.4)
+   WAYFARER — P1 v10 (spec v3.4)
+   v10 (review pass): minimap with gates/chests/seal/boss markers, alpha rework
+       (telegraphed charge -> stone crash -> 1.6x punish window), seals now grant
+       +12% sling damage each, Warden epilogue with square celebration and +300
+       reward, screen shake on damage, sling trail + muzzle flash.
    v9: the warband (hire up to two companions who follow, fight, go down and are
        revived), branch alphas in standing-stone lairs at depth 6 with a two-phase
        fight and a Seal apiece, and progress that survives a refresh.
@@ -288,6 +292,7 @@ function buildAlpha(){         /* branch boss: huge, scarred, pale-eyed */
 }
 const DIRE_SPR=buildDire(), SHRIKE_SPR=buildShrike(), ALPHA_SPR=buildAlpha();
 let seals={};                      /* branch key -> true once its alpha falls */
+let epilogue=false;
 const sealCount = ()=>Object.keys(seals).length;
 const LAIRS={N:'The White Ring', E:'The Snarl\u2019s Heart',
              S:'The Drowning Deep', W:'The Cut Bottom'};
@@ -400,6 +405,27 @@ const buildings=[], trees=[], lamps=[], props=[], wallTiles=[], glints=[], decor
 const cliffs=[], rocks=[], npcs=[], doors=[], chests=[];
 let exits=[];
 let interiorSave=null;
+let minimapCv=null;
+function buildMinimap(){
+  const [c,x]=mkCanvas(MW,MH);
+  const col={
+    [GID.grass0]:'#3f6a33',[GID.grass1]:'#3a6230',[GID.road]:'#8a7150',
+    [GID.water]:'#2a6a90',[GID.floor]:'#b0a284',[GID.plank]:'#8a6a42',
+    [GID.bank]:'#5d7444',[GID.cobble]:'#9a917f',[GID.rockg]:'#57504a',
+    [GID.gravel]:'#8a8172'
+  };
+  for(let ty=0;ty<MH;ty++)for(let tx=0;tx<MW;tx++){
+    const i=idx(tx,ty);
+    x.fillStyle=col[ground[i]]||'#3f6a33';
+    x.fillRect(tx,ty,1,1);
+    if(solid[i]&&ground[i]!==GID.water&&ground[i]!==GID.floor){
+      x.fillStyle='rgba(0,0,0,0.3)'; x.fillRect(tx,ty,1,1);
+    }
+  }
+  x.fillStyle='#c9b27a';
+  for(const b of buildings) x.fillRect(b.tx,b.ty,b.tw,b.th);
+  minimapCv=c;
+}
 let region={branch:null, depth:0, name:'Havenbrook Vale', interior:false, settlement:true};
 let renown=0;
 let banner=null;                 // {name,sub,t}
@@ -692,6 +718,36 @@ function doContext(){
   else if(r==='recruit') ui={mode:'hire', npc:a.npc, keys:[a.npc.hire], title:a.npc.name};
 }
 
+function dressCelebration(){
+  if(region.depth!==0 || region.interior || region.celebrated || sealCount()<4) return;
+  region.celebrated=true;
+  addProp('bonfire', RX, RY+1, true);
+  addProp('flags', RX-3, RY-2, false); addProp('flags', RX+3, RY-2, false);
+  addProp('flags', RX-3, RY+4, false); addProp('flags', RX+3, RY+4, false);
+  const cheer=[
+    ['Warden of the Four Roads! Say it plain!'],
+    ['Four seals. I owe Pell a keg.'],
+    ['Never doubted it. Well. Barely.'],
+    ['Coldharrow sent word. The roads are quiet.']
+  ];
+  let placed2=0;
+  for(let tries=0;tries<200 && placed2<cheer.length;tries++){
+    const tx=RX+RI(-4,4), ty=RY+RI(-4,4);
+    if(!inMap(tx,ty)||solid[idx(tx,ty)])continue;
+    if(Math.abs(tx-RX)<1&&Math.abs(ty-RY)<2)continue;
+    npcs.push(mkNpc(tx,ty, placed2===0?'Hana':placed2===1?'Tobin':placed2===2?'Old Pell':'a settler',
+      cheer[placed2][0], false));
+    placed2++;
+  }
+}
+function grantEpilogue(){
+  if(epilogue || sealCount()<4 || region.depth!==0) return;
+  epilogue=true;
+  player.coins+=300;
+  banner={name:'WARDEN OF THE FOUR ROADS', sub:'THE VALE STANDS  \u00b7  +300 COIN', t:0};
+  beep(660,0.4,0.05,'triangle');
+  saveGame();
+}
 function gatePos(d){
   if(d==='N')return {x:RX*16+8, y:(BORDER+1)*16+8};
   if(d==='S')return {x:RX*16+8, y:(MH-BORDER-2)*16+8};
@@ -958,6 +1014,7 @@ function genDecor(){
         decor.push({t:'wf',x:px+RI(2,12),y:py+RI(2,12),seed:RI(0,99)});
     }
   }
+  buildMinimap();
   for(const t of trees){
     if(rng()<0.3){
       const mx=t.x+RI(-10,10), my=t.y+RI(2,9);
@@ -1489,7 +1546,7 @@ const GEAR_SLING=[1,1.35,1.75,2.20];
 const GEAR_HP   =[0,25,50,80];
 const GEAR_DODGE=[1,0.78,0.58,0.58];
 const GEAR_FOCUS=[1,1.30,1.62,1.62];
-const slingDmg  = ()=>B.SLING.dmg*GEAR_SLING[player.gear.sling];
+const slingDmg  = ()=>B.SLING.dmg*GEAR_SLING[player.gear.sling]*(1+0.12*sealCount());
 const maxHp     = ()=>100+GEAR_HP[player.gear.armor];
 const dodgeCost = ()=>Math.round(B.DODGE_COST*GEAR_DODGE[player.gear.boots]);
 const focusMult = ()=>GEAR_FOCUS[player.gear.focus];
@@ -1504,7 +1561,7 @@ function saveGame(){
     const d={
       v:1, coins:player.coins, gear:player.gear, bandages:player.bandages,
       hp:player.hp, hpMax:player.hpMax, kills:player.kills,
-      renown:renown, seals:seals, bounty:bounty, dayN:dayN, gameT:gameT,
+      renown:renown, seals:seals, epilogue:epilogue, bounty:bounty, dayN:dayN, gameT:gameT,
       party: party.map(p=>({key:p.key, hp:p.hp})),
       at: region.interior ? {branch:interiorSave&&interiorSave.branch,
                              depth:interiorSave?interiorSave.depth:0}
@@ -1526,6 +1583,7 @@ function loadGame(){
   player.hp=Math.max(20,Math.min(player.hpMax, d.hp||player.hpMax));
   renown=d.renown|0;
   seals=d.seals||{};
+  epilogue=!!d.epilogue;
   bounty=d.bounty||null;
   dayN=d.dayN||1;
   gameT=(typeof d.gameT==='number')?d.gameT:8*60;
@@ -1541,6 +1599,8 @@ function loadGame(){
   if(at.depth>0 && at.branch){
     applyTravel({branch:at.branch, depth:at.depth, entryDir:OPP[at.branch]});
     banner=null;
+  } else {
+    dressCelebration();
   }
   return true;
 }
@@ -1725,6 +1785,7 @@ function applyTravel(to){
                 +'  \u00b7  DEPTH '+region.depth
              : 'DEPTH '+region.depth+'  \u00b7  '+BRANCHES[to.branch||region.branch||'N'].label),
           t:0};
+  if(region.depth===0){ dressCelebration(); grantEpilogue(); }
 }
 spawnAnimals();
 
@@ -1781,6 +1842,8 @@ const hints = [
     trig:()=>party.some(p=>p.hp<=0), sat:s=>party.every(p=>p.hp>0)},
   {id:53, text:'The road ends at a ring of stones. Something waits there.',
     trig:()=>isBossDepth(region.depth)&&!region.interior, sat:s=>s.t>6},
+  {id:54, text:'When it lowers its head \u2014 move. Let the stones take the hit.',
+    trig:()=>wolves.some(w=>w.boss&&w.bstate==='windup'), sat:s=>wolves.some(w=>w.boss&&w.bstate==='stun')},
   {id:50, text:'Something bigger runs with them this deep.',
     trig:()=>wolves.some(w=>w.kind==='dire'&&w.hp>0&&Math.hypot(w.x-player.x,w.y-player.y)<130),
     sat:s=>s.t>5}
@@ -1911,6 +1974,7 @@ function beep(freq,dur,vol,type){
 
 /* ---------------- actions ------------------------------------------ */
 let shakeAether=0;
+let shakeT=0;
 function tryDodge(){
   if(player.dodgeT>0) return;
   if(player.aether < dodgeCost()){ shakeAether=0.4; return; }
@@ -1948,6 +2012,8 @@ function tryCast(){
   hitstop = Math.max(hitstop, 2/60);
 }
 function hurtWolf(w,dmg,fx,fy,kb){
+  if(w.bstate==='stun') dmg*=1.6;
+  if(w.boss) kb=(kb||1)*0.22;
   w.hp -= dmg; w.flashT = 0.09; w.hitT = 0.09;
   const a=Math.atan2(w.y-fy,w.x-fx);
   w.lvx = Math.cos(a)*60*(kb||1); w.lvy = Math.sin(a)*60*(kb||1);
@@ -1975,8 +2041,8 @@ function hurtWolf(w,dmg,fx,fy,kb){
           t:R(0.4,1.2),col:i%3?'#bfe3ef':'#ffd24a',sz:2}); }
       for(let i=0;i<26;i++){ const pa=R(0,6.28), sp2=R(40,110);
         coins.push({x:w.x,y:w.y-6,vx:Math.cos(pa)*sp2,vy:Math.sin(pa)*sp2,t:0}); }
-      say(sealCount()>=4 ? 'Four seals. Every road is yours.'
-                         : 'A seal. Three roads still run.');
+      say(sealCount()>=4 ? 'Four seals. Your sling sings with them.'
+                         : 'A seal. Your sling hits harder for it. (+12%)');
       saveGame();
     }
     if(bounty&&!bounty.done&&bounty.have<bounty.need) bounty.have++;
@@ -2003,6 +2069,7 @@ function hurtWolf(w,dmg,fx,fy,kb){
 function hurtPlayer(dmg){
   if(player.iframes>0 || inTown(player.x,player.y)) return;
   player.hp -= dmg;
+  shakeT=Math.max(shakeT,0.22);
   player.aether *= (1-B.AETHER_HIT_LOSS);
   player.lastHitT = 0;
   player.flashT = 0.15;
@@ -2028,6 +2095,7 @@ function update(dt){
     if(fade&&fade.phase==='out') return;
   }
   if(banner){ banner.t+=dt; if(banner.t>4.2) banner=null; }
+  shakeT=Math.max(0,shakeT-dt);
   if(doorLock>0) doorLock-=dt;
   if(doorLock<=0 && !fade){
     const ptx=Math.floor(player.x/16), pty=Math.floor(player.y/16);
@@ -2156,6 +2224,10 @@ function update(dt){
       const a=Math.atan2(best.y-6-player.y+8, best.x-player.x);
       projectiles.push({x:player.x,y:player.y-8,
         vx:Math.cos(a)*B.SLING.speed, vy:Math.sin(a)*B.SLING.speed, t:0.8});
+      for(let i=0;i<2;i++)
+        particles.push({x:player.x+Math.cos(a)*7,y:player.y-8+Math.sin(a)*7,
+          vx:Math.cos(a+R(-0.5,0.5))*40,vy:Math.sin(a+R(-0.5,0.5))*40,
+          t:0.1,col:'#fff4d0',sz:1});
       beep(700+R(-60,60),0.03,0.015,'triangle');
     }
   }
@@ -2219,8 +2291,57 @@ function update(dt){
             t:R(0.2,0.5),col:'#9d9384',sz:1}); }
       }
     }
+    if(w.boss&&!w.bstate){
+      w.chargeT = (w.chargeT===undefined? R(3.5,6) : w.chargeT) - dt;
+      if(w.chargeT<=0 && d<180 && d>24 && !inT){
+        w.bstate='windup'; w.bT=0.7;
+        w.tgx=player.x; w.tgy=player.y;
+        beep(70,0.45,0.07,'sawtooth');
+      }
+    }
     const playerSafe = inT;
-    if(playerSafe || d>150){
+    if(w.bstate==='windup'){
+      w.bT-=dt;
+      if(Math.random()<dt*22)
+        particles.push({x:w.x+R(-12,12),y:w.y+R(-2,4),vx:R(-14,14),vy:R(-30,-8),
+          t:R(0.2,0.4),col:'#9d9384',sz:1});
+      if(w.bT<=0){
+        const a2=Math.atan2(w.tgy-w.y, w.tgx-w.x);
+        w.bvx=Math.cos(a2)*320; w.bvy=Math.sin(a2)*320;
+        w.face=w.bvx>0?1:-1;
+        w.bstate='charge'; w.bT=1.15;
+        beep(140,0.2,0.07,'square');
+      }
+    } else if(w.bstate==='charge'){
+      const bx0=w.x, by0=w.y;
+      moveEntity(w, w.bvx*dt, w.bvy*dt);
+      const moved=Math.hypot(w.x-bx0,w.y-by0);
+      if(Math.random()<dt*30)
+        particles.push({x:w.x-w.bvx*0.03,y:w.y+2,vx:R(-10,10),vy:R(-24,-6),
+          t:R(0.2,0.45),col:'#9d9384',sz:1});
+      const pd=Math.hypot(player.x-w.x,player.y-w.y);
+      if(pd<18){
+        hurtPlayer(8*(w.dmg||1));
+        shakeT=Math.max(shakeT,0.35);
+        w.bstate=null; w.chargeT = w.phase===2?R(3,4.5):R(5,7.5);
+      } else if(moved < Math.hypot(w.bvx,w.bvy)*dt*0.35){
+        w.bstate='stun'; w.bT=1.7;
+        shakeT=Math.max(shakeT,0.3);
+        hitstop=Math.max(hitstop,5/60);
+        beep(85,0.35,0.08,'sawtooth');
+        for(let i=0;i<16;i++){
+          const pa=R(0,6.28), sp2=R(30,110);
+          particles.push({x:w.x,y:w.y-8,vx:Math.cos(pa)*sp2,vy:Math.sin(pa)*sp2,
+            t:R(0.3,0.7),col:i%2?PAL.rock:PAL.rockL,sz:i%3?1:2});
+        }
+      } else {
+        w.bT-=dt;
+        if(w.bT<=0){ w.bstate=null; w.chargeT = w.phase===2?R(3,4.5):R(5,7.5); }
+      }
+    } else if(w.bstate==='stun'){
+      w.bT-=dt;
+      if(w.bT<=0){ w.bstate=null; w.chargeT = w.phase===2?R(3,4.5):R(5,7.5); }
+    } else if(playerSafe || d>150){
       w.stT-=dt;
       if(w.stT<=0){w.stT=R(1,3);w.wa=R(0,Math.PI*2);w.wm=rng()<0.6;}
       if(w.wm){ const s=18*slow*(w.sp||1);
@@ -2711,7 +2832,12 @@ function drawFlocks(cx,cy){
 let waterPhase=0;
 function render(dt){
   waterPhase+=dt;
-  const cx = Math.round(camX), cy = Math.round(camY);
+  let cx = Math.round(camX), cy = Math.round(camY);
+  if(shakeT>0){
+    const k=Math.min(3,shakeT*13);
+    cx+=Math.round(Math.sin(performance.now()/17)*k);
+    cy+=Math.round(Math.cos(performance.now()/23)*k*0.6);
+  }
   g.fillStyle='#0a0c10'; g.fillRect(0,0,LW,LH);
 
   const tx0=Math.max(0,Math.floor(cx/16)), ty0=Math.max(0,Math.floor(cy/16));
@@ -2801,9 +2927,15 @@ function render(dt){
   for(const d of draws)d.fn();
 
   /* projectiles / novas / coins / particles */
-  g.fillStyle='#d8d2c4';
-  for(const p of projectiles)
-    g.fillRect(Math.round(p.x-cx)-1,Math.round(p.y-cy)-1,2,2);
+  for(const p of projectiles){
+    const px=Math.round(p.x-cx), py=Math.round(p.y-cy);
+    g.globalAlpha=0.25; g.fillStyle='#b8b2a0';
+    g.fillRect(Math.round(px-p.vx*0.024)-1,Math.round(py-p.vy*0.024),2,1);
+    g.globalAlpha=0.5;
+    g.fillRect(Math.round(px-p.vx*0.012)-1,Math.round(py-p.vy*0.012)-1,2,2);
+    g.globalAlpha=1; g.fillStyle='#e8e2d0';
+    g.fillRect(px-1,py-1,2,2);
+  }
   for(const n of novas){
     g.save(); g.globalAlpha=Math.max(0,1-n.t/0.45);
     g.strokeStyle=PAL.frost; g.lineWidth=2;
@@ -3300,6 +3432,29 @@ function drawProp(p,cx,cy){
       g.fillStyle='#8a6a42'; g.fillRect(x-6+i*8,y-9,5,8);
       g.fillStyle='#4a3520'; g.fillRect(x-7+i*8,y-8,7,1); g.fillRect(x-7+i*8,y-4,7,1);
     }
+  } else if(p.type==='bonfire'){
+    g.fillStyle=PAL.ash; g.fillRect(x-9,y-5,18,5);
+    g.fillStyle=PAL.rock;
+    for(let i=0;i<7;i++)g.fillRect(x-10+i*3,y-6,3,3);
+    g.fillStyle=PAL.beam;
+    g.fillRect(x-7,y-9,14,3); g.fillRect(x-3,y-13,6,6); g.fillRect(x-1,y-15,3,4);
+    const t3=performance.now()/80+p.seed;
+    const fh=8+Math.round(Math.sin(t3)*3+Math.sin(t3*1.7));
+    g.fillStyle='#e0642a'; g.fillRect(x-5,y-11-fh,10,fh);
+    g.fillStyle=PAL.ember; g.fillRect(x-3,y-10-fh,6,fh);
+    g.fillStyle='#ffd98a'; g.fillRect(x-1,y-9-fh,3,Math.max(2,fh-3));
+    g.save(); g.globalAlpha=0.25; g.fillStyle=PAL.ember;
+    g.fillRect(x-18,y-26,36,28); g.restore();
+  } else if(p.type==='flags'){
+    g.fillStyle=PAL.beam; g.fillRect(x-9,y-16,1,16); g.fillRect(x+8,y-16,1,16);
+    g.fillStyle='#6b543a'; g.fillRect(x-9,y-16,18,1);
+    const cols=['#c94b3c','#e8c85a','#7ad0ff','#8ce0a0'];
+    const sw2=Math.sin(performance.now()/450+p.seed)*0.8;
+    for(let i=0;i<4;i++){
+      g.fillStyle=cols[(p.seed+i)%4];
+      const fx2=x-8+i*4+Math.round(sw2);
+      g.fillRect(fx2,y-15,3,3); g.fillRect(fx2+1,y-12,1,1);
+    }
   } else if(p.type==='menhir'){
     const h=22+(p.seed%9);
     g.fillStyle=PAL.rockD; g.fillRect(x-5,y-h,10,h);
@@ -3437,6 +3592,8 @@ function drawWolf(w,cx,cy){
     g.translate(0,Math.round(k*4));
     g.scale(1+k*0.30, 1-k*0.66);
   }
+  if(w.bstate==='windup')
+    g.translate(Math.round(Math.sin(performance.now()/22)*1.6),0);
   if(w.face<0)g.scale(-1,1);
   if(!dying && w.hitT>0){                          // impact squash
     const q=Math.min(1,w.hitT/0.09);
@@ -3454,6 +3611,18 @@ function drawWolf(w,cx,cy){
     g.drawImage(tintOf(spr,'#ffc0a0'),ox,oy);
   }
   g.restore();
+  if(w.bstate==='windup'){
+    g.fillStyle= Math.floor(performance.now()/90)%2?'#e0503c':'#ffd98a';
+    g.fillRect(x-1,y-(w.oy||11)-11,3,6); g.fillRect(x-1,y-(w.oy||11)-4,3,2);
+  }
+  if(w.bstate==='stun'){
+    const t2=performance.now()/140;
+    g.fillStyle='#ffd98a';
+    for(let i=0;i<3;i++){
+      const an=t2+i*2.1;
+      g.fillRect(Math.round(x+Math.cos(an)*9),Math.round(y-(w.oy||11)-6+Math.sin(an)*3),2,2);
+    }
+  }
   const hw=(w.ox||9)-2;
   if(w.chill>0){
     g.fillStyle=PAL.frost;
@@ -3515,7 +3684,8 @@ function drawNpc(n,cx,cy){
     let lx=x-lw2/2-4;
     lx=Math.max(2,Math.min(LW-lw2-10,lx));
     g.fillStyle='rgba(0,0,0,0.7)'; g.fillRect(lx,y-43,lw2+8,11);
-    g.fillStyle=BRANCHES.N.tint; g.fillRect(lx,y-43,lw2+8,1);
+    g.fillStyle=(region.branch?BRANCHES[region.branch]:BRANCHES.N).tint;
+    g.fillRect(lx,y-43,lw2+8,1);
     g.fillStyle=PAL.hud; g.fillText(n.line,lx+4,y-41);
     g.restore();
   }
@@ -3682,6 +3852,40 @@ function drawHUD(){
       px+=lv*3+4;
     }
   }
+  if(!region.interior && minimapCv){
+    const sc=0.42, mw=Math.round(MW*sc), mh=Math.round(MH*sc);
+    const mx=3, my=42;
+    g.save();
+    g.globalAlpha=0.72;
+    g.fillStyle='#0a0c10'; g.fillRect(mx-1,my-1,mw+2,mh+2);
+    g.drawImage(minimapCv,0,0,MW,MH,mx,my,mw,mh);
+    g.globalAlpha=0.9;
+    for(const e of exits){
+      const ex=mx+((e.px0+e.px1)/2/16)*sc, ey=my+((e.py0+e.py1)/2/16)*sc;
+      g.fillStyle='#ffd24a';
+      g.fillRect(Math.round(ex)-1,Math.round(ey)-1,3,3);
+    }
+    for(const c2 of chests){
+      if(c2.opened)continue;
+      g.fillStyle='#c9992a';
+      g.fillRect(Math.round(mx+c2.tx*sc),Math.round(my+c2.ty*sc),1,1);
+    }
+    for(const p2 of props){
+      if(p2.type!=='sealstone')continue;
+      g.fillStyle= (region.branch&&seals[region.branch])?'#8ce0a0':PAL.frost;
+      g.fillRect(Math.round(mx+p2.tx*sc)-1,Math.round(my+p2.ty*sc)-1,3,3);
+    }
+    const bsm=wolves.find(w=>w.boss&&w.hp>0);
+    if(bsm){
+      g.fillStyle= Math.floor(performance.now()/300)%2?'#e0503c':'#8a2a20';
+      g.fillRect(Math.round(mx+bsm.x/16*sc)-1,Math.round(my+bsm.y/16*sc)-1,3,3);
+    }
+    if(Math.floor(performance.now()/250)%2){
+      g.fillStyle='#ffffff';
+      g.fillRect(Math.round(mx+player.x/16*sc)-1,Math.round(my+player.y/16*sc)-1,2,2);
+    }
+    g.restore();
+  }
   { const bs2=wolves.find(w=>w.boss&&w.hp>0);
     if(bs2){
       const A3=ALPHAS[region.branch]||{name:'The Alpha'};
@@ -3693,7 +3897,9 @@ function drawHUD(){
       g.fillStyle='#6a5f52'; g.fillRect(bx+Math.round(bw*0.5),by,1,5);
       g.fillStyle=PAL.hud;
       g.fillText(A3.name, bx, by-9);
-      if(bs2.phase===2){ g.fillStyle='#e0703c';
+      if(bs2.bstate==='stun'){ g.fillStyle='#ffd98a';
+        const w3='STUNNED \u2014 HIT IT'; g.fillText(w3, bx+bw-g.measureText(w3).width, by-9); }
+      else if(bs2.phase===2){ g.fillStyle='#e0703c';
         const w2='ENRAGED'; g.fillText(w2, bx+bw-g.measureText(w2).width, by-9); }
     }
   }
@@ -3709,6 +3915,7 @@ function drawHUD(){
       col = PAL.hud;
     } else if(region.depth===0){
       s2 = inTown(player.x,player.y)?'HAVENBROOK \u2014 SAFE':'HAVENBROOK VALE';
+      if(epilogue) s2 += '  \u2726';
       col = inTown(player.x,player.y)?PAL.hud:PAL.hudDim;
     } else {
       s2 = region.name.toUpperCase()+'  \u25c6'+region.depth
