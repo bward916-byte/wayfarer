@@ -18,7 +18,10 @@
 <script>
 'use strict';
 /* ============================================================
-   WAYFARER — P1 v8 (spec v3.4)
+   WAYFARER — P1 v9 (spec v3.4)
+   v9: the warband (hire up to two companions who follow, fight, go down and are
+       revived), branch alphas in standing-stone lairs at depth 6 with a two-phase
+       fight and a Seal apiece, and progress that survives a refresh.
    v8: coin now buys things — forge and goods shops with tiered gear, an inn bed,
        chapel mending, watchhouse bounties, bandages on a button, treasure chests
        out on the roads, and two new beasts (direwolf, shrike) mixed by depth.
@@ -265,12 +268,42 @@ function buildShrike(){        /* small, fast, pale, low to the ground */
   }
   return out;
 }
-const DIRE_SPR=buildDire(), SHRIKE_SPR=buildShrike();
+function buildAlpha(){         /* branch boss: huge, scarred, pale-eyed */
+  const out=[];
+  for(let f=0;f<2;f++){
+    const [c,x]=mkCanvas(38,24);
+    x.fillStyle='#2a2723';
+    x.fillRect(6,6,22,11); x.fillRect(25,2,11,8);
+    x.fillStyle='#1c1a17';
+    x.fillRect(0,5,7,4); x.fillRect(32,10,4,4);
+    x.fillRect(8+(f?2:0),17,5,7); x.fillRect(20-(f?2:0),17,5,7);
+    x.fillStyle='#3d3934';
+    x.fillRect(9,3,16,3); x.fillRect(12,1,3,2); x.fillRect(18,1,3,2);
+    x.fillStyle='#6a5f52'; x.fillRect(11,8,9,1); x.fillRect(14,11,7,1);
+    x.fillStyle='#bfe3ef'; x.fillRect(31,4,2,2);
+    x.fillStyle='#e8e2d0'; x.fillRect(34,7,2,3); x.fillRect(29,8,2,2);
+    out.push(c);
+  }
+  return out;
+}
+const DIRE_SPR=buildDire(), SHRIKE_SPR=buildShrike(), ALPHA_SPR=buildAlpha();
+let seals={};                      /* branch key -> true once its alpha falls */
+const sealCount = ()=>Object.keys(seals).length;
+const LAIRS={N:'The White Ring', E:'The Snarl\u2019s Heart',
+             S:'The Drowning Deep', W:'The Cut Bottom'};
+const ALPHAS={
+  N:{name:'The White Sire',   line:'Something older than the pass.'},
+  E:{name:'Bramblejaw',       line:'The Snarl has a throat.'},
+  S:{name:'The Drowned Bitch',line:'She came up out of the mire.'},
+  W:{name:'Cutstone Alpha',   line:'It has been down there a long time.'}
+};
+function isBossDepth(d){ return d===6; }
 
 const BEASTS={
   wolf:  {spr:()=>WOLF_SPR,   ox:9, oy:11, hp:1.0,  dmg:1.0, speed:1.0,  cd:[1,2.5], name:'wolf'},
   dire:  {spr:()=>DIRE_SPR,   ox:12,oy:15, hp:2.4,  dmg:1.7, speed:0.82, cd:[2,3.6], name:'direwolf'},
-  shrike:{spr:()=>SHRIKE_SPR, ox:7, oy:9,  hp:0.55, dmg:0.7, speed:1.45, cd:[0.6,1.4],name:'shrike'}
+  shrike:{spr:()=>SHRIKE_SPR, ox:7, oy:9,  hp:0.55, dmg:0.7, speed:1.45, cd:[0.6,1.4],name:'shrike'},
+  alpha: {spr:()=>ALPHA_SPR,  ox:19,oy:23, hp:9.0,  dmg:2.4, speed:0.92, cd:[1.6,2.8],name:'alpha'}
 };
 function beastRoll(depth, branch){
   if(depth<=0) return 'wolf';
@@ -519,6 +552,7 @@ function enterBuilding(b){
   genInterior(b);
   const p=doors[0];
   player.x=(p?p.tx:Math.floor(MW/2))*16+8; player.y=(MH-3)*16+8;
+  regroupParty();
   camX=MW*16<=LW?(MW*16-LW)/2:Math.max(0,Math.min(player.x-LW/2,MW*16-LW));
   camY=MH*16<=LH?(MH*16-LH)/2:Math.max(0,Math.min(player.y-LH/2,MH*16-LH));
   doorLock=0.6;
@@ -541,12 +575,14 @@ function leaveBuilding(){
   else genWild(sv.branch,sv.depth);
   player.x=sv.x; player.y=sv.y;
   if(!solidAt(player.x, player.y+18)) player.y+=18;   // step clear of the doorstep
+  regroupParty();
   camX=Math.max(0,Math.min(player.x-LW/2,MW*16-LW));
   camY=Math.max(0,Math.min(player.y-LH/2,MH*16-LH));
   spawnAnimals();
   if(region.depth>0) spawnWildPacks();
   else { spawnWolfPack(66*16,36*16,4); spawnWolfPack(76*16,26*16,3); }
   doorLock=0.8;
+  saveGame();
   beep(300,0.06,0.035,'sine');
 }
 function genInterior(b){
@@ -581,6 +617,11 @@ function genInterior(b){
     P('kegs',1,1,true); P('shelf',2,1,true);
     npcs.push(mkNpc(cx-1,2,'Maera','Ale\u2019s warm, the road\u2019s cold. A bed is 10 coin.',true,'inn'));
     npcs.push(mkNpc(4,5,'a drover','Wolves thicker past the second gate. Mind yourself.',false));
+    const hire=['scout','shield','archer'][Math.abs(hashSeed('hire:'+(b.name||''),b.tx))%3];
+    const HC=COMPANIONS[hire];
+    const rec=mkNpc(w-3,4,HC.name,HC.blurb,true,'recruit');
+    rec.hire=hire; rec.spr=buildDoll(HC.look);
+    npcs.push(rec);
   } else if(kind==='smithy'){
     P('forge',w-3,1,true); P('anvil',cx,3,true);
     P('rack',1,1,true); P('barrel',2,1,true); P('crate',w-2,4,true);
@@ -618,7 +659,7 @@ function mkNpc(tx,ty,name,line,fixed,role){
     role:role||null,
     hx:tx*16+8, hy:ty*16+12, wanderT:R(0,3), wa:R(0,6.28), wm:false};
 }
-const ROLE_VERB={shop:'TRADE', smith:'FORGE', inn:'REST', chapel:'PRAY', watch:'BOUNTY'};
+const ROLE_VERB={shop:'TRADE', smith:'FORGE', inn:'REST', chapel:'PRAY', watch:'BOUNTY', recruit:'HIRE'};
 function contextAction(){
   if(region.interior){
     let best=null,bd=30;
@@ -648,6 +689,7 @@ function doContext(){
   else if(r==='inn')   restAtInn();
   else if(r==='chapel')chapelHeal();
   else if(r==='watch') bountyAction();
+  else if(r==='recruit') ui={mode:'hire', npc:a.npc, keys:[a.npc.hire], title:a.npc.name};
 }
 
 function gatePos(d){
@@ -1103,12 +1145,57 @@ function genTown(branchKey, depth){
   genDecor();
 }
 
+function buildLair(branchKey, vert){
+  /* the road ends here: clear an arena, ring it in standing stones, no way on */
+  const AR=11;
+  for(let ty=RY-AR;ty<=RY+AR;ty++)for(let tx=RX-AR;tx<=RX+AR;tx++){
+    if(!inMap(tx,ty)||sideOf(tx,ty))continue;
+    const d=Math.hypot(tx-RX,ty-RY);
+    if(d>AR)continue;
+    const i=idx(tx,ty);
+    solid[i]=0;
+    ground[i] = d>AR-1.6 ? GID.rockg : (d>AR-4 ? GID.gravel : GID.cobble);
+  }
+  for(let a=0;a<12;a++){
+    const an=a/12*Math.PI*2;
+    const tx=Math.round(RX+Math.cos(an)*(AR-0.5)), ty=Math.round(RY+Math.sin(an)*(AR-0.5));
+    if(!inMap(tx,ty)||sideOf(tx,ty))continue;
+    if(vert?Math.abs(tx-RX)<=1:Math.abs(ty-RY)<=1)continue;
+    addProp('menhir',tx,ty,true);
+  }
+  addProp('sealstone', RX, RY-AR+3, true);
+  /* seal off the far gate — this road goes no further */
+  for(const c of gateCells(branchKey)){
+    const i=idx(c[0],c[1]);
+    ground[i]=GID.rockg; solid[i]=1;
+    cliffs.push({tx:c[0],ty:c[1],side:branchKey,seed:RI(0,255)});
+  }
+  exits = exits.filter(e=>e.dir!==branchKey);
+  for(let k=0;k<3;k++){
+    const tx=RX+RI(-AR+3,AR-3), ty=RY+RI(-AR+3,AR-3);
+    if(inMap(tx,ty)&&!solid[idx(tx,ty)]) addChest(tx,ty,3);
+  }
+}
+function spawnAlpha(){
+  const K=BEASTS.alpha;
+  const hp=Math.round(30*(1+6*0.55)*K.hp);
+  const a={
+    x:RX*16+8, y:(RY+4)*16+8, kind:'alpha', spr:K.spr(), ox:K.ox, oy:K.oy, sp:K.speed,
+    hp:hp, hpMax:hp, dmg:(1+6*0.32)*K.dmg, face:-1, frame:0, animT:0, flashT:0,
+    state:'idle', stT:0, circA:R(0,Math.PI*2), circDir:rng()<0.5?1:-1,
+    lungeT:0, lvx:0, lvy:0, chill:0, deadT:0, boss:true, howlT:R(3,5), phase:1
+  };
+  wolves.push(a);
+  return a;
+}
+
 function genWild(branchKey, depth){
   clearWorld();
   const BR=BRANCHES[branchKey];
   const nm=BR.names[Math.min(depth-1,BR.names.length-1)];
   region={branch:branchKey, depth:depth, interior:false, settlement:false,
-          name: depth>BR.names.length ? nm+' \u00b7 '+depth : nm};
+          name: isBossDepth(depth) ? LAIRS[branchKey]
+              : depth>BR.names.length ? nm+' \u00b7 '+depth : nm};
   rng=mulberry32(hashSeed('wild:'+branchKey,depth));
   const wr=mulberry32(hashSeed(branchKey,depth));
   const vert = (branchKey==='N'||branchKey==='S');
@@ -1167,7 +1254,8 @@ function genWild(branchKey, depth){
 
   /* rim: rock all round, gates on the travel axis only */
   buildRim([], [branchKey, OPP[branchKey]], wr);
-  dressGate(branchKey, BRANCHES[branchKey].label, 'DEEPER');
+  dressGate(branchKey, isBossDepth(depth+1)?'THE LAIR':BRANCHES[branchKey].label,
+            isBossDepth(depth+1)?'NO WAY ON':'DEEPER');
   dressGate(OPP[branchKey], depth===1?'HAVENBROOK':BRANCHES[branchKey].label, 'BACK');
   addExit(branchKey, {branch:branchKey, depth:depth+1, entryDir:OPP[branchKey]});
   addExit(OPP[branchKey], {branch: depth-1>0?branchKey:null, depth:depth-1, entryDir:branchKey});
@@ -1242,6 +1330,7 @@ function genWild(branchKey, depth){
     glints.push({x:tx*16+RI(2,13),y:ty*16+RI(2,13),ph:R(0,6.28),sp:R(0.4,1.4)});
   }
 
+  if(isBossDepth(depth)) buildLair(branchKey, vert);
   scatterChests(3+Math.floor(depth/2));
   genDecor();
 }
@@ -1283,6 +1372,116 @@ for(let i=0;i<3;i++)clouds.push({x:R(0,MW*16),y:R(0,MH*16),
   rx:R(55,95),ry:R(26,42),vx:R(4,8)});
 let hitstop=0, flowT=0, flowActive=false;
 let bounty=null;                    // {need,have,reward,depth,done}
+let party=[];                       // companions, max 2
+const PARTY_MAX=2;
+const COMPANIONS={
+  scout:{name:'Mira',  role:'Scout',  hp:70,  dmg:5,  cd:0.62, range:86, speed:70, melee:false,
+         price:80,  blurb:'Fast. Keeps her distance and picks them off.',
+         look:{skin:'#e8b98a',hair:'#8a6a2e',tunic:'#4a6b3a',legs:'#3a3a2c'}},
+  shield:{name:'Corran',role:'Shield',hp:150, dmg:9,  cd:0.85, range:20, speed:52, melee:true,
+         price:110, blurb:'Slow, heavy, gets between you and them.',
+         look:{skin:'#c99a66',hair:'#2e2620',tunic:'#4a5a7a',legs:'#2e3440'}},
+  archer:{name:'Sela', role:'Archer', hp:60,  dmg:8,  cd:0.9,  range:120,speed:60, melee:false,
+         price:130, blurb:'Longest reach in the warband. Fragile.',
+         look:{skin:'#a87a52',hair:'#241c16',tunic:'#6a4a6a',legs:'#3a3040'}}
+};
+function recruit(key){
+  const C=COMPANIONS[key];
+  if(party.some(p=>p.key===key)){ say(C.name+' already walks with you.'); return; }
+  if(party.length>=PARTY_MAX){ say('Two is all you can keep fed.'); return; }
+  if(player.coins<C.price){ say(C.name+' wants '+C.price+' coin.'); return; }
+  player.coins-=C.price;
+  party.push({
+    key:key, name:C.name, role:C.role, spr:buildDoll(C.look),
+    x:player.x, y:player.y+14, dir:'down', frame:0, animT:0, moving:false,
+    hp:C.hp, hpMax:C.hp, dmg:C.dmg, cd:C.cd, range:C.range, speed:C.speed,
+    melee:C.melee, fireT:0, downT:0, swing:0, slot:party.length
+  });
+  say(C.name+' joins you.');
+  saveGame();
+  beep(700,0.16,0.05,'triangle');
+}
+function regroupParty(){
+  for(let i=0;i<party.length;i++){
+    const p=party[i];
+    p.x=player.x+(i?12:-12); p.y=player.y+10;
+    if(solidAt(p.x,p.y)){ p.x=player.x; p.y=player.y; }
+    if(p.hp<=0 && inTown(player.x,player.y)) p.hp=Math.round(p.hpMax*0.5);
+    p.fireT=0;
+  }
+}
+function partyFormation(i){
+  const back = Math.atan2(-(stick.dy||0), -(stick.dx||0));
+  const a = (i===0? 2.35 : -2.35) + (player.dir==='left'?Math.PI:0);
+  return {x: player.x + Math.cos(a)*20, y: player.y + Math.sin(a)*14 + 4};
+}
+function updateParty(dt){
+  for(const p of party){
+    if(p.hp<=0){
+      p.downT+=dt; p.moving=false;
+      const near = Math.hypot(p.x-player.x,p.y-player.y)<26;
+      if(inTown(p.x,p.y)){ p.hp=Math.round(p.hpMax*0.5); p.downT=0; say(p.name+' is back on her feet.'); }
+      else if(near){
+        p.reviveT=(p.reviveT||0)+dt;
+        if(p.reviveT>3.2){ p.hp=Math.round(p.hpMax*0.4); p.downT=0; p.reviveT=0;
+          say(p.name+' is up.'); beep(560,0.12,0.04,'sine'); }
+      } else p.reviveT=0;
+      continue;
+    }
+    p.swing=Math.max(0,p.swing-dt);
+    p.fireT-=dt;
+    /* nearest live enemy in reach */
+    let tgt=null, td=p.range+70;
+    for(const w of wolves){
+      if(w.hp<=0)continue;
+      const d=Math.hypot(w.x-p.x,w.y-p.y);
+      if(d<td){td=d;tgt=w;}
+    }
+    const leash=Math.hypot(p.x-player.x,p.y-player.y);
+    let gx,gy;
+    if(tgt && leash<130 && !inTown(player.x,player.y)){
+      const want = p.melee? 12 : p.range*0.7;
+      const a=Math.atan2(tgt.y-p.y,tgt.x-p.x);
+      gx = tgt.x - Math.cos(a)*want;
+      gy = tgt.y - Math.sin(a)*want;
+    } else {
+      const f=partyFormation(p.slot); gx=f.x; gy=f.y;
+    }
+    const dx=gx-p.x, dy=gy-p.y, dd=Math.hypot(dx,dy);
+    if(dd>4){
+      const sp=p.speed*(leash>90?1.5:1);
+      const mx=dx/dd*sp*dt, my=dy/dd*sp*dt;
+      const bx=p.x, by=p.y;
+      moveEntity(p,mx,my);
+      p.moving=(p.x!==bx||p.y!==by);
+      if(p.moving){
+        p.dir = Math.abs(mx)>Math.abs(my)?(mx>0?'right':'left'):(my>0?'down':'up');
+        p.animT+=dt; if(p.animT>0.16){p.animT=0;p.frame=1-p.frame;}
+      }
+      if(leash>210){ p.x=player.x; p.y=player.y+14; }
+    } else p.moving=false;
+    /* attack */
+    if(tgt && p.fireT<=0){
+      const d=Math.hypot(tgt.x-p.x,tgt.y-p.y);
+      if(p.melee){
+        if(d<20){ p.fireT=p.cd; p.swing=0.16;
+          hurtWolf(tgt,p.dmg,p.x,p.y,0.8); beep(300,0.05,0.02,'square'); }
+      } else if(d<p.range){
+        p.fireT=p.cd;
+        const a=Math.atan2(tgt.y-6-p.y+6, tgt.x-p.x);
+        projectiles.push({x:p.x,y:p.y-8,vx:Math.cos(a)*210,vy:Math.sin(a)*210,
+          t:0.8, dmg:p.dmg, from:p});
+        beep(640+R(-50,50),0.03,0.012,'triangle');
+      }
+    }
+  }
+}
+function hurtCompanion(p,dmg){
+  if(p.hp<=0)return;
+  p.hp-=dmg;
+  if(p.hp<=0){ p.hp=0; p.downT=0; p.reviveT=0;
+    say(p.name+' is down.'); beep(170,0.18,0.05,'sawtooth'); }
+}
 let ui=null;                        // open panel, freezes the world
 let toast=null;                     // {text,t}
 
@@ -1295,6 +1494,57 @@ const maxHp     = ()=>100+GEAR_HP[player.gear.armor];
 const dodgeCost = ()=>Math.round(B.DODGE_COST*GEAR_DODGE[player.gear.boots]);
 const focusMult = ()=>GEAR_FOCUS[player.gear.focus];
 function say(t){ toast={text:t,t:0}; }
+
+/* ---- progress persistence (silently skipped where storage is unavailable) ---- */
+const SAVE_KEY='wayfarer.save.v1';
+let saveOK=true;
+function saveGame(){
+  if(!saveOK) return;
+  try{
+    const d={
+      v:1, coins:player.coins, gear:player.gear, bandages:player.bandages,
+      hp:player.hp, hpMax:player.hpMax, kills:player.kills,
+      renown:renown, seals:seals, bounty:bounty, dayN:dayN, gameT:gameT,
+      party: party.map(p=>({key:p.key, hp:p.hp})),
+      at: region.interior ? {branch:interiorSave&&interiorSave.branch,
+                             depth:interiorSave?interiorSave.depth:0}
+                          : {branch:region.branch, depth:region.depth}
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(d));
+  }catch(_){ saveOK=false; }
+}
+function loadGame(){
+  let d=null;
+  try{ const raw=localStorage.getItem(SAVE_KEY); if(raw) d=JSON.parse(raw); }
+  catch(_){ saveOK=false; return false; }
+  if(!d||d.v!==1) return false;
+  player.coins=d.coins|0;
+  if(d.gear) for(const k in player.gear) player.gear[k]=d.gear[k]|0;
+  player.bandages=d.bandages|0;
+  player.kills=d.kills|0;
+  player.hpMax=maxHp();
+  player.hp=Math.max(20,Math.min(player.hpMax, d.hp||player.hpMax));
+  renown=d.renown|0;
+  seals=d.seals||{};
+  bounty=d.bounty||null;
+  dayN=d.dayN||1;
+  gameT=(typeof d.gameT==='number')?d.gameT:8*60;
+  party=[];
+  for(const sp of (d.party||[])){
+    const C=COMPANIONS[sp.key]; if(!C)continue;
+    party.push({key:sp.key,name:C.name,role:C.role,spr:buildDoll(C.look),
+      x:player.x,y:player.y+14,dir:'down',frame:0,animT:0,moving:false,
+      hp:Math.max(0,Math.min(C.hp,sp.hp)),hpMax:C.hp,dmg:C.dmg,cd:C.cd,range:C.range,
+      speed:C.speed,melee:C.melee,fireT:0,downT:0,swing:0,slot:party.length});
+  }
+  const at=d.at||{depth:0};
+  if(at.depth>0 && at.branch){
+    applyTravel({branch:at.branch, depth:at.depth, entryDir:OPP[at.branch]});
+    banner=null;
+  }
+  return true;
+}
+function wipeSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(_){} }
 
 const GOODS={
   bandage:{name:'Bandage',        price:12,  desc:'Heal 40 when used'},
@@ -1334,10 +1584,12 @@ function buyGood(k){
     player.gear[g.gear]=g.lvl;
     if(g.gear==='armor'){ const d=maxHp()-player.hpMax; player.hpMax=maxHp(); player.hp+=d; }
     say(g.name+' \u2014 fitted.');
+    saveGame();
   } else {
     player.bandages++;
     say('Bandage stowed. ('+player.bandages+')');
   }
+  saveGame();
   beep(760,0.09,0.045,'triangle');
 }
 function useBandage(){
@@ -1358,10 +1610,12 @@ function restAtInn(){
   if(player.coins<cost){ say('A bed costs '+cost+' coin.'); return; }
   player.coins-=cost;
   player.hp=player.hpMax; player.aether=0;
+  for(const p of party){ p.hp=p.hpMax; p.downT=0; p.reviveT=0; }
   const h=hourNow();
   gameT = (h>=7? (24+7):7)*60;
   if(gameT>=24*60){ gameT-=24*60; dayN++; }
   say('You sleep until morning.');
+  saveGame();
   beep(330,0.25,0.04,'sine');
 }
 function chapelHeal(){
@@ -1383,6 +1637,7 @@ function bountyAction(){
       say('Bounty paid: '+bounty.reward+' coin.');
       beep(820,0.18,0.05,'triangle');
       bounty=null;
+      saveGame();
     } else say('Bounty: '+bounty.have+' of '+bounty.need+' culled.');
     return;
   }
@@ -1421,6 +1676,7 @@ function spawnWolfPack(cx,cy,n){
 spawnWolfPack(66*16, 36*16, 4);
 spawnWolfPack(76*16, 26*16, 3);
 let respawnT = 0;
+let booted=false;
 
 function spawnWildPacks(){
   const packs=2+Math.min(4,region.depth);
@@ -1448,17 +1704,24 @@ function applyTravel(to){
   else if(isTownDepth(to.depth)) genTown(to.branch,to.depth);
   else genWild(to.branch,to.depth);
   renown=Math.max(renown,region.depth);
+  saveGame();
   const p=gatePos(to.entryDir);
   player.x=p.x; player.y=p.y;
+  regroupParty();
   camX = MW*16<=LW ? (MW*16-LW)/2 : Math.max(0,Math.min(player.x-LW/2, MW*16-LW));
   camY = MH*16<=LH ? (MH*16-LH)/2 : Math.max(0,Math.min(player.y-LH/2, MH*16-LH));
   spawnAnimals();
-  if(region.depth>0) spawnWildPacks();
+  if(region.depth>0 && isBossDepth(region.depth)){
+    if(!seals[region.branch]) spawnAlpha();
+    else spawnWildPacks();
+  }
+  else if(region.depth>0) spawnWildPacks();
   else { spawnWolfPack(66*16,36*16,4); spawnWolfPack(76*16,26*16,3); }
   region.cx=region.cx||TOWN_CX; region.cy=region.cy||TOWN_CY;
   banner={name:region.name,
           sub: region.depth===0 ? 'SAFE GROUND'
-             : (region.settlement ? (region.blurb||'a settlement').toUpperCase()
+             : (isBossDepth(region.depth) ? 'THE ROAD ENDS  \u00b7  DEPTH '+region.depth
+             : region.settlement ? (region.blurb||'a settlement').toUpperCase()
                 +'  \u00b7  DEPTH '+region.depth
              : 'DEPTH '+region.depth+'  \u00b7  '+BRANCHES[to.branch||region.branch||'N'].label),
           t:0};
@@ -1511,6 +1774,13 @@ const hints = [
     trig:()=>player.hp<player.hpMax*0.5&&player.bandages>0, sat:s=>player.hp>player.hpMax*0.8},
   {id:49, text:'A chest. Stand close and press the round button.',
     trig:()=>nearestChestDist()<40, sat:s=>{const a=contextAction();return !a||a.kind!=='chest';}},
+  {id:51, text:'Taverns keep someone looking for work. Hire them.',
+    trig:()=>region.interior&&npcs.some(n=>n.role==='recruit')&&party.length<PARTY_MAX,
+    sat:s=>party.length>0},
+  {id:52, text:'Stand by a downed companion to bring them back up.',
+    trig:()=>party.some(p=>p.hp<=0), sat:s=>party.every(p=>p.hp>0)},
+  {id:53, text:'The road ends at a ring of stones. Something waits there.',
+    trig:()=>isBossDepth(region.depth)&&!region.interior, sat:s=>s.t>6},
   {id:50, text:'Something bigger runs with them this deep.',
     trig:()=>wolves.some(w=>w.kind==='dire'&&w.hp>0&&Math.hypot(w.x-player.x,w.y-player.y)<130),
     sat:s=>s.t>5}
@@ -1692,6 +1962,23 @@ function hurtWolf(w,dmg,fx,fy,kb){
   if(w.hp<=0){
     beep(220,0.15,0.05,'sawtooth');
     player.kills++;
+    if(w.boss && region.branch && !seals[region.branch]){
+      seals[region.branch]=true;
+      const A2=ALPHAS[region.branch];
+      banner={name:(A2?A2.name:'The Alpha')+' falls',
+              sub:'SEAL TAKEN  \u00b7  '+sealCount()+' OF 4', t:0};
+      player.coins+=180;
+      hitstop=Math.max(hitstop,14/60);
+      beep(880,0.5,0.06,'triangle');
+      for(let i=0;i<60;i++){ const pa=R(0,6.28), sp2=R(30,150);
+        particles.push({x:w.x,y:w.y-8,vx:Math.cos(pa)*sp2,vy:Math.sin(pa)*sp2,
+          t:R(0.4,1.2),col:i%3?'#bfe3ef':'#ffd24a',sz:2}); }
+      for(let i=0;i<26;i++){ const pa=R(0,6.28), sp2=R(40,110);
+        coins.push({x:w.x,y:w.y-6,vx:Math.cos(pa)*sp2,vy:Math.sin(pa)*sp2,t:0}); }
+      say(sealCount()>=4 ? 'Four seals. Every road is yours.'
+                         : 'A seal. Three roads still run.');
+      saveGame();
+    }
     if(bounty&&!bounty.done&&bounty.have<bounty.need) bounty.have++;
     w.flashT=0;
     for(let i=0;i<12;i++){
@@ -1750,6 +2037,7 @@ function update(dt){
       break;
     }
   }
+  updateParty(dt);
   for(const n of npcs){
     if(n.fixed){ n.moving=false; continue; }
     n.wanderT-=dt;
@@ -1878,7 +2166,8 @@ function update(dt){
     if(!dead)for(const w of wolves){
       if(w.hp<=0)continue;
       if(Math.hypot(w.x-p.x,w.y-6-p.y)<((w.ox||9)-2)){
-        hurtWolf(w,slingDmg(),player.x,player.y,1); dead=true; break;
+        const src=p.from||player;
+        hurtWolf(w, p.dmg||slingDmg(), src.x, src.y, 1); dead=true; break;
       }
     }
     if(dead)projectiles.splice(i,1);
@@ -1899,7 +2188,37 @@ function update(dt){
       w.lvx*=0.85; w.lvy*=0.85;
     }
     const dx=player.x-w.x, dy=player.y-w.y, d=Math.hypot(dx,dy)||1;
-    const slow = w.chill>0?B.NOVA.chillSlow:1;
+    let slow = w.chill>0?B.NOVA.chillSlow:1;
+    if(w.boss){
+      if(w.phase===1 && w.hp<=w.hpMax*0.5){
+        w.phase=2; w.sp=1.18; w.howlT=Math.min(w.howlT,2);
+        say('It stops circling.');
+        hitstop=Math.max(hitstop,8/60); beep(120,0.5,0.06,'sawtooth');
+        for(let i=0;i<26;i++){ const pa=R(0,6.28), sp2=R(40,130);
+          particles.push({x:w.x,y:w.y-6,vx:Math.cos(pa)*sp2,vy:Math.sin(pa)*sp2,
+            t:R(0.3,0.8),col:i%2?'#bfe3ef':'#6a5f52',sz:2}); }
+      }
+      w.chill=0;
+      w.howlT-=dt;
+      if(w.howlT<=0 && d<170){
+        w.howlT = w.phase===2?6:9;
+        beep(90,0.55,0.06,'sawtooth');
+        const n=w.phase===2?4:3;
+        for(let k=0;k<n;k++){
+          const an=R(0,Math.PI*2), rr=R(70,110);
+          const sx=w.x+Math.cos(an)*rr, sy=w.y+Math.sin(an)*rr;
+          if(solidAt(sx,sy))continue;
+          const hp2=Math.round(30*(1+6*0.55)*BEASTS.shrike.hp);
+          wolves.push({x:sx,y:sy,kind:'shrike',spr:SHRIKE_SPR,ox:7,oy:9,sp:1.45,
+            hp:hp2,hpMax:hp2,dmg:(1+6*0.32)*BEASTS.shrike.dmg,face:1,frame:0,animT:0,
+            flashT:0,state:'circle',stT:0,circA:R(0,6.28),circDir:rng()<0.5?1:-1,
+            lungeT:0,lvx:0,lvy:0,chill:0,deadT:0,cd:R(0.4,1)});
+        }
+        for(let i=0;i<18;i++){ const pa=R(0,6.28), sp2=R(30,90);
+          particles.push({x:w.x,y:w.y-8,vx:Math.cos(pa)*sp2,vy:Math.sin(pa)*sp2,
+            t:R(0.2,0.5),col:'#9d9384',sz:1}); }
+      }
+    }
     const playerSafe = inT;
     if(playerSafe || d>150){
       w.stT-=dt;
@@ -1930,6 +2249,10 @@ function update(dt){
         w.lvx2=Math.cos(la)*ls; w.lvy2=Math.sin(la)*ls;
       }
       if(d<10) hurtPlayer(B.CONTACT_DPS*dt*(w.dmg||1));
+      for(const cp of party){
+        if(cp.hp<=0)continue;
+        if(Math.hypot(cp.x-w.x,cp.y-w.y)<11) hurtCompanion(cp, B.CONTACT_DPS*dt*(w.dmg||1)*0.8);
+      }
     }
     /* never enter town/bridges */
     if(inTown(w.x,w.y)){
@@ -1938,7 +2261,7 @@ function update(dt){
       w.x+=Math.cos(a)*50*dt; w.y+=Math.sin(a)*50*dt;
     }
   }
-  if(wolves.filter(w=>w.hp>0).length<3){
+  if(wolves.filter(w=>w.hp>0).length<3 && !(isBossDepth(region.depth)&&!seals[region.branch])){
     respawnT-=dt;
     if(respawnT<=0){
       for(let tries=0;tries<80;tries++){
@@ -2440,6 +2763,7 @@ function render(dt){
   for(const t of trees)blob(t.x,t.y-1,7);
   for(const r of rocks)blob(r.x,r.y-1,r.big?7:5);
   for(const n of npcs)blob(n.x,n.y+1,5);
+  for(const p of party)blob(p.x,p.y+1,5);
   g.restore();
 
   /* y-sorted entities & props */
@@ -2471,6 +2795,7 @@ function render(dt){
   }
   for(const s of spectators) draws.push({y:s.y, fn:()=>drawSpectator(s,cx,cy)});
   for(const n of npcs) draws.push({y:n.y, fn:()=>drawNpc(n,cx,cy)});
+  for(const p of party) draws.push({y:p.y, fn:()=>drawCompanion(p,cx,cy)});
   draws.push({y:player.y, fn:()=>drawPlayer(cx,cy)});
   draws.sort((a,b)=>a.y-b.y);
   for(const d of draws)d.fn();
@@ -2975,6 +3300,30 @@ function drawProp(p,cx,cy){
       g.fillStyle='#8a6a42'; g.fillRect(x-6+i*8,y-9,5,8);
       g.fillStyle='#4a3520'; g.fillRect(x-7+i*8,y-8,7,1); g.fillRect(x-7+i*8,y-4,7,1);
     }
+  } else if(p.type==='menhir'){
+    const h=22+(p.seed%9);
+    g.fillStyle=PAL.rockD; g.fillRect(x-5,y-h,10,h);
+    g.fillStyle=PAL.rock;  g.fillRect(x-4,y-h+1,8,h-2);
+    g.fillStyle=PAL.rockL; g.fillRect(x-4,y-h+1,8,2);
+    g.fillStyle=PAL.rockD; g.fillRect(x-2+(p.seed%3),y-h+6,2,h-10);
+    if(p.seed%3===0){ g.fillStyle=PAL.rockMoss; g.fillRect(x-4,y-6,6,3); }
+    if(lightLevel()<0.8){
+      g.save(); g.globalAlpha=0.30+0.2*Math.sin(performance.now()/400+p.seed);
+      g.fillStyle=PAL.frost; g.fillRect(x-2,y-h+8,4,4); g.restore();
+    }
+  } else if(p.type==='sealstone'){
+    g.fillStyle=PAL.rockD; g.fillRect(x-11,y-8,22,8);
+    g.fillStyle=PAL.stone; g.fillRect(x-10,y-10,20,4);
+    g.fillStyle=PAL.rockD; g.fillRect(x-7,y-30,14,20);
+    g.fillStyle=PAL.gateStone; g.fillRect(x-6,y-29,12,18);
+    g.fillStyle=PAL.rockL; g.fillRect(x-8,y-33,16,4);
+    const taken = region.branch && seals[region.branch];
+    const t=performance.now()/300;
+    g.save();
+    g.globalAlpha= taken?0.85:0.35+0.25*Math.sin(t);
+    g.fillStyle = taken?'#8ce0a0':PAL.frost;
+    g.fillRect(x-3,y-25,6,6); g.fillRect(x-1,y-27,2,10); g.fillRect(x-5,y-23,10,2);
+    g.restore();
   } else if(p.type==='gatepost'){
     g.fillStyle=PAL.rockD;    g.fillRect(x-5,y-22,10,22);
     g.fillStyle=PAL.gateStone;g.fillRect(x-4,y-21,8,20);
@@ -3117,6 +3466,38 @@ function drawWolf(w,cx,cy){
     g.fillRect(x-hw,by,Math.round(hw*2*w.hp/w.hpMax),2);
   }
 }
+function drawCompanion(p,cx,cy){
+  const x=Math.round(p.x-cx), y=Math.round(p.y-cy);
+  if(x<-20||x>LW+20||y<-28||y>LH+28)return;
+  if(p.hp<=0){
+    g.save(); g.globalAlpha=0.55;
+    g.translate(x,y); g.scale(1.15,0.5);
+    g.drawImage(p.spr['down'][0], -8, -19);
+    g.restore();
+    const t=Math.floor(performance.now()/300)%2;
+    g.fillStyle= t?'#e0704a':'#8a4030';
+    g.fillRect(x-1,y-16,2,2);
+    if(Math.hypot(p.x-player.x,p.y-player.y)<26){
+      const k=Math.min(1,(p.reviveT||0)/3.2);
+      g.fillStyle='#000'; g.fillRect(x-8,y-21,16,2);
+      g.fillStyle='#8ce0a0'; g.fillRect(x-8,y-21,Math.round(16*k),2);
+    }
+    return;
+  }
+  const spr=p.spr[p.dir][p.moving?p.frame:0];
+  g.drawImage(spr, x-8, y-19);
+  if(p.swing>0){
+    g.save(); g.globalAlpha=p.swing*5;
+    g.fillStyle='#e8e2d0';
+    const s=p.dir==='left'?-1:1;
+    g.fillRect(x+s*7,y-12,s*5,2); g.fillRect(x+s*9,y-14,s*3,2);
+    g.restore();
+  }
+  if(p.hp<p.hpMax){
+    g.fillStyle='#000'; g.fillRect(x-7,y-24,14,2);
+    g.fillStyle='#6fbf8a'; g.fillRect(x-7,y-24,Math.round(14*p.hp/p.hpMax),2);
+  }
+}
 function drawNpc(n,cx,cy){
   const x=Math.round(n.x-cx), y=Math.round(n.y-cy);
   if(x<-20||x>LW+20||y<-28||y>LH+28)return;
@@ -3177,6 +3558,16 @@ function uiRows(){
     out.push({key:ui.keys[i], x:6, y:top+i*rh, w:LW-12, h:rh-2});
   return out;
 }
+function uiEntry(k){
+  if(ui&&ui.mode==='hire'){
+    const C=COMPANIONS[k];
+    const joined=party.some(p=>p.key===k);
+    return {name:C.name+' \u2014 '+C.role, desc:C.blurb, price:C.price,
+      state: joined?'owned' : (party.length>=PARTY_MAX?'locked':'buy')};
+  }
+  const g=GOODS[k];
+  return {name:g.name, desc:g.desc, price:g.price, state:goodState(k)};
+}
 function uiCloseRect(){ return {x:LW-24, y:5, w:18, h:12}; }
 function uiTap(p){
   const cr=uiCloseRect();
@@ -3184,7 +3575,10 @@ function uiTap(p){
     ui=null; beep(300,0.05,0.03); return;
   }
   for(const r of uiRows()){
-    if(p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h){ buyGood(r.key); return; }
+    if(p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h){
+      if(ui.mode==='hire') recruit(r.key); else buyGood(r.key);
+      return;
+    }
   }
 }
 function drawShop(){
@@ -3199,22 +3593,24 @@ function drawShop(){
   g.fillStyle='#4a2e2a'; g.fillRect(cr.x,cr.y,cr.w,cr.h);
   g.fillStyle=PAL.hud;   g.fillText('X', cr.x+6, cr.y+2);
   for(const r of uiRows()){
-    const gd=GOODS[r.key], st=goodState(r.key);
+    const e=uiEntry(r.key), st=e.state;
     g.fillStyle = st==='owned'?'rgba(38,66,44,0.7)'
                : st==='locked'?'rgba(30,32,38,0.7)':'rgba(40,48,62,0.85)';
     g.fillRect(r.x,r.y,r.w,r.h);
     g.fillStyle = st==='buy'?PAL.aether : st==='owned'?'#8ce0a0':'#4a4a44';
     g.fillRect(r.x,r.y,2,r.h);
     g.fillStyle = st==='locked'?'#6a6458':PAL.hud;
-    g.fillText(gd.name, r.x+6, r.y+2);
-    const tag = st==='owned'?'owned' : st==='locked'?'locked' : '\u25c9'+gd.price;
+    g.fillText(e.name, r.x+6, r.y+2);
+    const tag = st==='owned'?(ui.mode==='hire'?'with you':'owned')
+              : st==='locked'?(ui.mode==='hire'?'band full':'locked')
+              : '\u25c9'+e.price;
     g.fillStyle = st==='owned'?'#8ce0a0' : st==='locked'?'#6a6458'
-               : (player.coins>=gd.price?PAL.coin:'#c0705a');
+               : (player.coins>=e.price?PAL.coin:'#c0705a');
     g.fillText(tag, r.x+r.w-5-g.measureText(tag).width, r.y+2);
     g.fillStyle='#8b8578';
-    g.fillText(gd.desc, r.x+6, r.y+9);
+    g.fillText(e.desc, r.x+6, r.y+9);
   }
-  const foot='tap to buy';
+  const foot = ui.mode==='hire'?'tap to hire':'tap to buy';
   g.fillStyle=PAL.hudDim;
   g.fillText(foot,(LW-g.measureText(foot).width)/2, 22+uiRows().length*17+3);
   if(toast){
@@ -3258,6 +3654,25 @@ function drawHUD(){
   g.fillStyle=player.bandages>0?'#8ce0a0':'#5a5a52';
   const bs='\u271a'+player.bandages;
   g.fillText(bs, LW-g.measureText(bs).width-pad, pad+24);
+  { const n=sealCount();
+    for(let i=0;i<4;i++){
+      const sx=LW-pad-4-(3-i)*6, sy=pad+34;
+      g.fillStyle = i<n?'#bfe3ef':'#3a4048';
+      g.fillRect(sx,sy,4,4);
+      if(i<n){ g.fillStyle='#e8f6ff'; g.fillRect(sx+1,sy+1,2,2); }
+    }
+  }
+  { let py2=ay+13;
+    for(const p of party){
+      g.fillStyle = p.hp<=0?'#5a4038':'#22303a';
+      g.fillRect(pad,py2,30,4);
+      if(p.hp>0){ g.fillStyle='#6fbf8a';
+        g.fillRect(pad,py2,Math.round(30*p.hp/p.hpMax),4); }
+      g.fillStyle = p.hp<=0?'#a0705a':PAL.hudDim;
+      g.fillText(p.name, pad+33, py2-2);
+      py2+=7;
+    }
+  }
   { let px=pad, py=ay+7;
     const gearCols={sling:'#d8d2c4',armor:'#9aa8c0',boots:'#c9a54a',focus:PAL.aether};
     for(const k in player.gear){
@@ -3265,6 +3680,21 @@ function drawHUD(){
       g.fillStyle=gearCols[k];
       for(let i=0;i<lv;i++) g.fillRect(px+i*3, py+2, 2, 3);
       px+=lv*3+4;
+    }
+  }
+  { const bs2=wolves.find(w=>w.boss&&w.hp>0);
+    if(bs2){
+      const A3=ALPHAS[region.branch]||{name:'The Alpha'};
+      const bw=Math.round(LW*0.62), bx=(LW-bw)/2, by=LH-30;
+      g.fillStyle='rgba(0,0,0,0.62)'; g.fillRect(bx-2,by-10,bw+4,14);
+      g.fillStyle='#2a1a1a'; g.fillRect(bx,by,bw,5);
+      g.fillStyle= bs2.phase===2?'#e0703c':'#c94b3c';
+      g.fillRect(bx,by,Math.round(bw*Math.max(0,bs2.hp/bs2.hpMax)),5);
+      g.fillStyle='#6a5f52'; g.fillRect(bx+Math.round(bw*0.5),by,1,5);
+      g.fillStyle=PAL.hud;
+      g.fillText(A3.name, bx, by-9);
+      if(bs2.phase===2){ g.fillStyle='#e0703c';
+        const w2='ENRAGED'; g.fillText(w2, bx+bw-g.measureText(w2).width, by-9); }
     }
   }
   if(bounty&&!bounty.done){
@@ -3366,13 +3796,19 @@ function drawTouch(){
 }
 
 /* ---------------- fixed 60 Hz loop -------------------------------------- */
+/* restore any earlier run before the first frame */
+try{ if(loadGame()) say('Welcome back.'); }catch(_){}
+
 let last=performance.now(), acc=0;
+let autosaveT=0;
 function frame(now){
   let ft = now-last; last=now;
   if(ft>100)ft=100;
   acc+=ft;
   const STEP=1000/60;
   while(acc>=STEP){ update(STEP/1000); acc-=STEP; }
+  autosaveT+=ft;
+  if(autosaveT>20000){ autosaveT=0; saveGame(); }
   render(ft/1000);
   requestAnimationFrame(frame);
 }
