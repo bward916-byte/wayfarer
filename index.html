@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0a0c10">
+<title>WAYFARER — P1 Skeleton</title>
+<style>
+  html,body{margin:0;padding:0;background:#0a0c10;height:100%;overflow:hidden;
+    touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  canvas{display:block;position:fixed;left:0;top:0;image-rendering:pixelated;image-rendering:crisp-edges}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script>
+'use strict';
+/* ============================================================
+   WAYFARER — Build Phase P1 (skeleton) + P3 taste (kiting core)
+   Spec v3.4. Canvas 2D, zero deps, procedural art, touch-first.
+   P1: loop, atlas, tilemap, camera, collision, paper doll,
+       test town (safe), touch stick + buttons.
+   P3 taste: sling auto-fire, wolves, Aether, Flow, dodge,
+       Frost Nova, coins, hints 1-5.
+   ============================================================ */
+
+/* ---------------- constants (subset of Appendix B) ---------- */
+const B = {
+  TILE:16, DAY_MS:20*60*1000,
+  PLAYER_SPEED:62,
+  AETHER_MAX:100, AETHER_BASE:1.5, AETHER_PROX:1.2, AETHER_PROX_CAP:5,
+  AETHER_FLOW:3.5, AETHER_STILL:0.35, AETHER_HIT_LOSS:0.30,
+  FLOW_DELAY:4.0, FLOW_MOVE_PX:40, FLOW_MOVE_WINDOW:1.5,
+  FLOW_TIERS:[[4,1.0],[10,1.4],[20,1.9],[35,2.5]],
+  DODGE_COST:25, DODGE_IFRAMES:12,
+  CONTACT_DPS:4, MAX_HOSTILES:8,
+  SLING:{dmg:6, cd:0.55, range:90, speed:230},
+  NOVA:{cost:35, radiusT:3, dmg:30, chillDur:4, chillSlow:0.5},
+  COIN_MAGNET_PX:40, COIN_MAGNET_DELAY:0.4, COIN_FORCE_COLLECT:8,
+  HINT_ESCALATE_S:25, HINT_GIVEUP_S:60
+};
+
+/* ---------------- canvas / integer scaling ------------------ */
+const cv = document.getElementById('cv');
+const sc = cv.getContext('2d');
+const logical = document.createElement('canvas');
+const g = logical.getContext('2d');
+let LW=480, LH=270, SCALE=1, OX=0, OY=0, PORTRAIT=false;
+
+function resize(){
+  const w = window.innerWidth, h = window.innerHeight;
+  PORTRAIT = h > w;
+  LW = PORTRAIT?270:480; LH = PORTRAIT?480:270;
+  logical.width = LW; logical.height = LH;
+  const dpr = Math.min(window.devicePixelRatio||1, 3);
+  cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  cv.style.width = w+'px'; cv.style.height = h+'px';
+  SCALE = Math.max(1, Math.floor(Math.min(cv.width/LW, cv.height/LH)));
+  OX = Math.floor((cv.width - LW*SCALE)/2);
+  OY = Math.floor((cv.height - LH*SCALE)/2);
+  sc.imageSmoothingEnabled = false;
+  g.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------------- rng --------------------------------------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;
+  return((t^t>>>14)>>>0)/4294967296}}
+const rng = mulberry32(20260815);
+const R = (a,b)=>a+rng()*(b-a);
+const RI = (a,b)=>Math.floor(R(a,b+1));
+
+/* ---------------- palette ----------------------------------- */
+const PAL = {
+  grassA:'#4a7a3a', grassB:'#437237', grassC:'#528444',
+  road:'#8a7150', roadEdge:'#7a6244',
+  waterDeep:'#1d4e6e', water:'#2a6b8f', waterLit:'#4a93b5',
+  sand:'#c2ab7a',
+  wall:'#8d8578', wallDark:'#6e675c',
+  roofA:'#a0522d', roofB:'#8c4626', roofRidge:'#6e3213',
+  door:'#5a3a1e', window:'#ffd98a',
+  treeTrunk:'#5a4028', treeLeafA:'#2e5d2a', treeLeafB:'#3a6f33',
+  skin:'#e8b98a', hair:'#4a2f1a', tunic:'#3f6d8e', legs:'#41382c', belt:'#7a5a2e',
+  wolfA:'#6f6a63', wolfB:'#585349', wolfEye:'#ffd24a',
+  coin:'#ffd24a', coinDark:'#c9992a',
+  hud:'#e8e2d0', hudDim:'#9a9484',
+  hp:'#c94b3c', hpBack:'#3a201c',
+  aether:'#7ad0ff', aetherHi:'#c8f0ff', aetherBack:'#12303f',
+  flow2:'#9ae0ff', flow3:'#c0ecff', flow4:'#eefaff',
+  frost:'#9adcff', night:'#0a0c10'
+};
+
+/* ---------------- procedural atlas -------------------------- */
+function mkCanvas(w,h){const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d');x.imageSmoothingEnabled=false;return[c,x]}
+
+const T = {}; // tile sprites, 16x16
+(function buildTiles(){
+  const arng = mulberry32(7);
+  function tile(name, fn){const [c,x]=mkCanvas(16,16);fn(x);T[name]=c;}
+  function speck(x, col, n){x.fillStyle=col;
+    for(let i=0;i<n;i++)x.fillRect(Math.floor(arng()*16),Math.floor(arng()*16),1,1);}
+  tile('grass0',x=>{x.fillStyle=PAL.grassA;x.fillRect(0,0,16,16);
+    speck(x,PAL.grassC,6);speck(x,PAL.grassB,5);});
+  tile('grass1',x=>{x.fillStyle=PAL.grassB;x.fillRect(0,0,16,16);
+    speck(x,PAL.grassA,7);speck(x,PAL.grassC,3);});
+  tile('road',x=>{x.fillStyle=PAL.road;x.fillRect(0,0,16,16);
+    speck(x,PAL.roadEdge,8);speck(x,'#9c8460',4);});
+  tile('water',x=>{x.fillStyle=PAL.water;x.fillRect(0,0,16,16);});
+  tile('sand',x=>{x.fillStyle=PAL.sand;x.fillRect(0,0,16,16);
+    speck(x,'#b0996a',5);});
+  tile('floor',x=>{x.fillStyle='#b0a284';x.fillRect(0,0,16,16);
+    x.fillStyle='#a5977a';x.fillRect(0,7,16,1);x.fillRect(7,0,1,7);x.fillRect(11,8,1,8);});
+  tile('wall',x=>{x.fillStyle=PAL.wall;x.fillRect(0,0,16,16);
+    x.fillStyle=PAL.wallDark;x.fillRect(0,5,16,1);x.fillRect(0,11,16,1);
+    x.fillRect(5,0,1,5);x.fillRect(10,6,1,5);x.fillRect(3,12,1,4);});
+})();
+
+/* paper doll: composited player sprites, 4 dirs x 2 frames */
+function buildDoll(app){
+  // app = {skin, hair, tunic, legs}
+  const frames = {}; // dir -> [c0, c1]
+  const DIRS = ['down','up','left','right'];
+  for(const dir of DIRS){
+    frames[dir]=[];
+    for(let f=0; f<2; f++){
+      const [c,x] = mkCanvas(16,20);
+      const bob = f?1:0;
+      const step = f?2:-2;
+      // legs layer
+      x.fillStyle = app.legs;
+      if(dir==='left'||dir==='right'){
+        x.fillRect(6+ (f?1:-1),15,3,5); x.fillRect(8+(f?-1:1),15,3,5);
+      } else {
+        x.fillRect(5,15+(f?0:0),3,5-(f?1:0)); x.fillRect(9,15,3,5-(f?0:1));
+      }
+      // body / tunic layer
+      x.fillStyle = app.tunic;
+      x.fillRect(4,8+bob,8,8);
+      x.fillStyle = PAL.belt;
+      x.fillRect(4,13+bob,8,1);
+      // arms layer
+      x.fillStyle = app.tunic;
+      if(dir==='left'){ x.fillRect(3,9+bob,2,5); }
+      else if(dir==='right'){ x.fillRect(11,9+bob,2,5); }
+      else { x.fillRect(3,9+bob,2,5); x.fillRect(11,9+bob,2,5); }
+      x.fillStyle = app.skin;
+      if(dir==='left'){ x.fillRect(3,13+bob,2,2); }
+      else if(dir==='right'){ x.fillRect(11,13+bob,2,2); }
+      else { x.fillRect(3,13+bob,2,2); x.fillRect(11,13+bob,2,2); }
+      // head layer
+      x.fillStyle = app.skin;
+      x.fillRect(5,2+bob,6,6);
+      // hair layer
+      x.fillStyle = app.hair;
+      x.fillRect(4,1+bob,8,3);
+      if(dir==='up'){ x.fillRect(4,1+bob,8,5); }
+      else if(dir==='left'){ x.fillRect(9,3+bob,3,3); }
+      else if(dir==='right'){ x.fillRect(4,3+bob,3,3); }
+      // eyes (not for up)
+      if(dir!=='up'){
+        x.fillStyle='#20180f';
+        if(dir==='down'){ x.fillRect(6,5+bob,1,1); x.fillRect(9,5+bob,1,1); }
+        if(dir==='left'){ x.fillRect(6,5+bob,1,1); }
+        if(dir==='right'){ x.fillRect(9,5+bob,1,1); }
+      }
+      frames[dir].push(c);
+    }
+  }
+  return frames;
+}
+
+/* wolf sprites: 2 frames, right-facing (flip for left) */
+function buildWolf(){
+  const out=[];
+  for(let f=0; f<2; f++){
+    const [c,x]=mkCanvas(18,12);
+    x.fillStyle=PAL.wolfA;
+    x.fillRect(3,3,10,5);              // body
+    x.fillRect(12,1,5,4);              // head
+    x.fillStyle=PAL.wolfB;
+    x.fillRect(0,2,4,2);               // tail
+    x.fillRect(15,4,2,2);              // snout shade
+    // legs alternate
+    x.fillRect(4+(f?1:0),8,2,4); x.fillRect(10-(f?1:0),8,2,4);
+    x.fillStyle=PAL.wolfEye;
+    x.fillRect(14,2,1,1);              // eye glint
+    x.fillStyle=PAL.wolfB;
+    x.fillRect(13,0,2,1);              // ear
+    out.push(c);
+  }
+  return out;
+}
+const WOLF_SPR = buildWolf();
+
+/* ---------------- world / tilemap ---------------------------- */
+const MW=88, MH=64;
+const ground = new Uint8Array(MW*MH);   // 0 grass0 1 grass1 2 road 3 water 4 floor 5 sand
+const solid  = new Uint8Array(MW*MH);   // 1 = blocked
+const GID = {grass0:0, grass1:1, road:2, water:3, floor:4, sand:5};
+const GT  = ['grass0','grass1','road','water','floor','sand'];
+const idx = (tx,ty)=>ty*MW+tx;
+const inMap = (tx,ty)=>tx>=0&&ty>=0&&tx<MW&&ty<MH;
+
+const town = { x0:10*16, y0:18*16, x1:44*16, y1:46*16 };   // safe bounds, px
+const inTown = (x,y)=> x>=town.x0 && x<=town.x1 && y>=town.y0 && y<=town.y1;
+
+const buildings=[], trees=[], lamps=[];
+(function genWorld(){
+  const wr = mulberry32(99);
+  // base grass
+  for(let ty=0;ty<MH;ty++)for(let tx=0;tx<MW;tx++)
+    ground[idx(tx,ty)] = wr()<0.5?GID.grass0:GID.grass1;
+  // roads: cross through town, extending to map edges
+  for(let tx=0;tx<MW;tx++)for(let dy=-1;dy<=1;dy++)
+    ground[idx(tx,32+dy)]=GID.road;
+  for(let ty=0;ty<MH;ty++)for(let dx=-1;dx<=1;dx++)
+    ground[idx(27+dx,ty)]=GID.road;
+  // pond east of town
+  const pcx=62, pcy=14, pr=5;
+  for(let ty=pcy-pr-1;ty<=pcy+pr+1;ty++)for(let tx=pcx-pr-1;tx<=pcx+pr+1;tx++){
+    if(!inMap(tx,ty))continue;
+    const d=Math.hypot(tx-pcx,ty-pcy);
+    if(d<=pr){ground[idx(tx,ty)]=GID.water;solid[idx(tx,ty)]=1;}
+    else if(d<=pr+0.9 && ground[idx(tx,ty)]!==GID.road) ground[idx(tx,ty)]=GID.sand;
+  }
+  // buildings in town: {tx,ty,tw,th,door(tile x)}
+  function bld(tx,ty,tw,th){
+    buildings.push({tx,ty,tw,th,door:tx+Math.floor(tw/2)});
+    for(let y=ty;y<ty+th;y++)for(let x=tx;x<tx+tw;x++){
+      solid[idx(x,y)]=1; ground[idx(x,y)]=GID.floor;
+    }
+  }
+  bld(14,22,6,4);   // NW
+  bld(31,21,7,5);   // NE — tavern
+  bld(14,36,5,4);   // SW
+  bld(32,37,6,4);   // SE
+  // town lamps
+  lamps.push({x:27*16+8,y:30*16},{x:27*16+8,y:35*16},
+             {x:24*16,y:32*16+8},{x:31*16,y:32*16+8});
+  // trees outside town, off roads/water
+  for(let i=0;i<220;i++){
+    const tx=RI(1,MW-2), ty=RI(1,MH-2);
+    const px=tx*16+8, py=ty*16+8;
+    if(inTown(px,py))continue;
+    const gid=ground[idx(tx,ty)];
+    if(gid===GID.road||gid===GID.water||gid===GID.sand||solid[idx(tx,ty)])continue;
+    // keep road shoulders clear
+    if(Math.abs(ty-32)<3||Math.abs(tx-27)<3)continue;
+    solid[idx(tx,ty)]=1;
+    trees.push({x:px,y:ty*16+16,seed:RI(0,3)});
+  }
+  trees.sort((a,b)=>a.y-b.y);
+})();
+
+function solidAt(px,py){
+  const tx=Math.floor(px/16), ty=Math.floor(py/16);
+  if(!inMap(tx,ty))return 1;
+  return solid[idx(tx,ty)];
+}
+/* AABB move with per-axis slide; hitbox is feet: 10x6 */
+function moveEntity(e,dx,dy){
+  const hw=5,hh=3;
+  if(dx!==0){
+    const nx=e.x+dx, sx=dx>0?nx+hw:nx-hw;
+    if(!solidAt(sx,e.y-hh)&&!solidAt(sx,e.y+hh)) e.x=nx;
+  }
+  if(dy!==0){
+    const ny=e.y+dy, sy=dy>0?ny+hh:ny-hh;
+    if(!solidAt(e.x-hw,sy)&&!solidAt(e.x+hw,sy)) e.y=ny;
+  }
+  e.x=Math.min(Math.max(e.x,6),MW*16-6);
+  e.y=Math.min(Math.max(e.y,6),MH*16-6);
+}
+
+/* ---------------- game state --------------------------------- */
+const player = {
+  x:27*16+8, y:33*16+8, dir:'down', frame:0, animT:0,
+  hp:100, hpMax:100, aether:0, aetherMax:B.AETHER_MAX,
+  coins:0, iframes:0, dodgeT:0, dodgeVX:0, dodgeVY:0,
+  fireT:0, lastHitT:-99, flashT:0,
+  moving:false, moveSamples:[],
+  spr: buildDoll({skin:PAL.skin, hair:PAL.hair, tunic:PAL.tunic, legs:PAL.legs})
+};
+let gameT = 8*60;            // in-game minutes; day starts 08:00
+let dayN = 1;
+let clockAcc = 0;
+let wolves = [], projectiles = [], coins = [], particles = [], novas = [];
+let hitstop = 0;
+let flowT = 0;               // seconds of unbroken flow
+let flowActive = false;
+
+function spawnWolfPack(cx,cy,n){
+  for(let i=0;i<n;i++){
+    const a=R(0,Math.PI*2), d=R(10,40);
+    wolves.push({
+      x:cx+Math.cos(a)*d, y:cy+Math.sin(a)*d,
+      hp:30, hpMax:30, face:1, frame:0, animT:0, flashT:0,
+      state:'idle', stT:R(0,2), circA:R(0,Math.PI*2), circDir:rng()<0.5?1:-1,
+      lungeT:0, lvx:0, lvy:0, chill:0, hitT:0, deadT:0
+    });
+  }
+}
+spawnWolfPack(64*16, 34*16, 4);       // east field — the first fight, open ground
+spawnWolfPack(70*16, 22*16, 3);
+let respawnT = 0;
+
+/* ---------------- hints (subset of §4) ----------------------- */
+const hints = [
+  {id:1, text:'Drag anywhere on the left to move.',
+    trig:()=>true, sat:s=>s.movedPx>60},
+  {id:2, text:"Your weapon fires on its own. Just don't get hit.",
+    trig:()=>nearestWolfDist()<8*16, sat:s=>s.t>3},
+  {id:3, text:'\u25cd Aether. It builds when you\u2019re near danger.',
+    trig:()=>player.aether>=30, sat:s=>s.t>4},
+  {id:4, text:'[A] is lit. Cast it.',
+    trig:()=>player.aether>=B.NOVA.cost, sat:s=>s.cast},
+  {id:5, text:'Keep moving \u2014 standing still starves your Aether.',
+    trig:()=>combatActive()&&stillFor>3, sat:s=>player.moving}
+];
+const hintFlags = {};       // id -> done
+let activeHint = null;      // {h, t, movedPx, cast, escal}
+let stillFor = 0;
+
+function combatActive(){ return nearestWolfDist()<10*16 && !inTown(player.x,player.y); }
+function nearestWolfDist(){
+  let d=1e9;
+  for(const w of wolves){ if(w.hp<=0)continue;
+    d=Math.min(d, Math.hypot(w.x-player.x,w.y-player.y)); }
+  return d;
+}
+function updateHints(dt){
+  if(activeHint){
+    const s=activeHint; s.t+=dt;
+    if(s.h.sat(s)){ hintFlags[s.h.id]=true; s.leaving=0.5; }
+    if(s.leaving!==undefined){ s.leaving-=dt; if(s.leaving<=0) activeHint=null; return; }
+    if(s.t>B.HINT_GIVEUP_S){ activeHint=null; }   // requeue naturally via trig
+    return;
+  }
+  for(const h of hints){
+    if(hintFlags[h.id]) continue;
+    if(h.trig()){ activeHint={h,t:0,movedPx:0,cast:false}; break; }
+  }
+}
+
+/* ---------------- input: touch stick + buttons + keys -------- */
+const stick = {active:false, id:-1, ox:0, oy:0, dx:0, dy:0};
+const keys = {};
+window.addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;
+  if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase()))e.preventDefault();});
+window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
+
+const buttons = {}; // recomputed per layout: name -> {x,y,r,label}
+function layoutButtons(){
+  if(PORTRAIT){
+    buttons.A={x:LW-36, y:LH-92, r:18, label:'A'};
+    buttons.C={x:LW-78, y:LH-64, r:14, label:'C'};
+    buttons.D={x:LW-36, y:LH-140, r:14, label:'D'};
+  } else {
+    buttons.A={x:LW-34, y:LH-62, r:18, label:'A'};
+    buttons.C={x:LW-72, y:LH-36, r:14, label:'C'};
+    buttons.D={x:LW-34, y:LH-108, r:14, label:'D'};
+  }
+}
+layoutButtons();
+window.addEventListener('resize',layoutButtons);
+
+function toLogical(e){
+  const dpr = cv.width/window.innerWidth;
+  return {x:(e.clientX*dpr-OX)/SCALE, y:(e.clientY*dpr-OY)/SCALE};
+}
+const pointers = {};
+cv.addEventListener('pointerdown',e=>{
+  e.preventDefault(); cv.setPointerCapture(e.pointerId);
+  const p=toLogical(e); pointers[e.pointerId]=p;
+  // buttons first
+  for(const k in buttons){const b=buttons[k];
+    if(Math.hypot(p.x-b.x,p.y-b.y)<=b.r+6){ pressButton(k); return; }}
+  if(p.x < LW*0.55 && !stick.active){
+    stick.active=true; stick.id=e.pointerId;
+    stick.ox=p.x; stick.oy=p.y; stick.dx=0; stick.dy=0;
+    if(activeHint&&activeHint.h.id===1)activeHint.stickSeen=true;
+  }
+});
+cv.addEventListener('pointermove',e=>{
+  e.preventDefault();
+  if(stick.active && e.pointerId===stick.id){
+    const p=toLogical(e);
+    let dx=p.x-stick.ox, dy=p.y-stick.oy;
+    const m=Math.hypot(dx,dy), MAX=26;
+    if(m>MAX){dx=dx/m*MAX;dy=dy/m*MAX;}
+    stick.dx=dx; stick.dy=dy;
+  }
+});
+function endPointer(e){
+  if(stick.active && e.pointerId===stick.id){
+    stick.active=false; stick.dx=0; stick.dy=0;
+  }
+  delete pointers[e.pointerId];
+}
+cv.addEventListener('pointerup',endPointer);
+cv.addEventListener('pointercancel',endPointer);
+
+function pressButton(k){
+  if(k==='A') tryCast();
+  else if(k==='C') tryDodge();
+  else if(k==='D') beep(160,0.05,0.02); // ult stub (P6)
+}
+
+/* ---------------- tiny webaudio (P12 preview, minimal) ------- */
+let AC=null;
+function beep(freq,dur,vol,type){
+  try{
+    if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+    const o=AC.createOscillator(),ga=AC.createGain();
+    o.type=type||'triangle'; o.frequency.value=freq;
+    ga.gain.setValueAtTime(vol||0.05,AC.currentTime);
+    ga.gain.exponentialRampToValueAtTime(0.0001,AC.currentTime+dur);
+    o.connect(ga).connect(AC.destination);
+    o.start(); o.stop(AC.currentTime+dur);
+  }catch(_){}
+}
+
+/* ---------------- actions ------------------------------------ */
+function tryDodge(){
+  if(player.dodgeT>0) return;
+  if(player.aether < B.DODGE_COST){ shakeAether=0.4; return; }
+  let vx=stick.dx, vy=stick.dy;
+  if(keys['a']||keys['arrowleft'])vx=-1; if(keys['d']||keys['arrowright'])vx=1;
+  if(keys['w']||keys['arrowup'])vy=-1;  if(keys['s']||keys['arrowdown'])vy=1;
+  const m=Math.hypot(vx,vy)||1;
+  player.aether -= B.DODGE_COST;
+  player.dodgeT = B.DODGE_IFRAMES/60;
+  player.iframes = B.DODGE_IFRAMES/60;
+  player.dodgeVX = vx/m*300; player.dodgeVY = vy/m*300;
+  beep(520,0.08,0.04,'square');
+}
+function tryCast(){
+  if(inTown(player.x,player.y)) return;                    // no magic in town
+  if(player.aether < B.NOVA.cost){ shakeAether=0.4; return; }
+  player.aether -= B.NOVA.cost;
+  const r = B.NOVA.radiusT*16;
+  novas.push({x:player.x,y:player.y,r:4,rMax:r,t:0});
+  for(const w of wolves){
+    if(w.hp<=0)continue;
+    if(Math.hypot(w.x-player.x,w.y-player.y)<=r){
+      hurtWolf(w, B.NOVA.dmg, player.x, player.y, 2.2);
+      w.chill = B.NOVA.chillDur;
+    }
+  }
+  for(let i=0;i<26;i++){
+    const a=R(0,Math.PI*2), s=R(30,90);
+    particles.push({x:player.x,y:player.y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+      t:R(0.3,0.7), col:PAL.frost, sz:R(1,2)});
+  }
+  if(activeHint&&activeHint.h.id===4)activeHint.cast=true;
+  beep(880,0.18,0.06,'sine'); beep(1320,0.25,0.03,'sine');
+  hitstop = Math.max(hitstop, 2);
+}
+
+function hurtWolf(w,dmg,fx,fy,kb){
+  w.hp -= dmg; w.flashT = 0.1; w.hitT = 0.35;
+  const a=Math.atan2(w.y-fy,w.x-fx);
+  w.lvx = Math.cos(a)*60*(kb||1); w.lvy = Math.sin(a)*60*(kb||1);
+  hitstop = Math.max(hitstop,3/60);
+  for(let i=0;i<5;i++){
+    const pa=a+R(-0.7,0.7), s=R(20,70);
+    particles.push({x:w.x,y:w.y,vx:Math.cos(pa)*s,vy:Math.sin(pa)*s,
+      t:R(0.15,0.4), col:'#d8d2c4', sz:1});
+  }
+  if(w.hp<=0){
+    beep(220,0.15,0.05,'sawtooth');
+    const n=RI(3,7);
+    for(let i=0;i<n;i++){
+      const a2=R(0,Math.PI*2), s=R(30,80);
+      coins.push({x:w.x,y:w.y,vx:Math.cos(a2)*s,vy:Math.sin(a2)*s,t:0});
+    }
+    respawnT = 8;
+  } else beep(300,0.05,0.04,'square');
+}
+
+function hurtPlayer(dmg){
+  if(player.iframes>0 || inTown(player.x,player.y)) return;
+  player.hp -= dmg;
+  player.aether *= (1-B.AETHER_HIT_LOSS);
+  player.lastHitT = 0;                  // breaks flow
+  player.flashT = 0.15;
+  player.iframes = 0.5;
+  beep(140,0.15,0.07,'sawtooth');
+  if(player.hp<=0){
+    // P1 death: wake at town center (inn comes in P8)
+    player.hp = player.hpMax; player.aether=0;
+    player.coins = Math.floor(player.coins*0.75);
+    player.x=27*16+8; player.y=33*16+8;
+  }
+}
+
+/* ---------------- update ------------------------------------- */
+let camX=0, camY=0, shakeAether=0;
+function update(dt){
+  if(hitstop>0){ hitstop-=dt; return; }
+  clockAcc += dt*1000;
+  gameT = 8*60 + (clockAcc/B.DAY_MS)*24*60;
+  while(gameT>=24*60){gameT-=24*60; dayN++; clockAcc-=B.DAY_MS;}
+
+  const inT = inTown(player.x,player.y);
+
+  /* --- player movement --- */
+  let vx = stick.dx/26, vy = stick.dy/26;
+  if(keys['a']||keys['arrowleft'])vx=-1; if(keys['d']||keys['arrowright'])vx=1;
+  if(keys['w']||keys['arrowup'])vy=-1;  if(keys['s']||keys['arrowdown'])vy=1;
+  if(keys[' ']){keys[' ']=false; tryDodge();}
+  if(keys['e']||keys['enter']){keys['e']=false;keys['enter']=false; tryCast();}
+  const mag = Math.hypot(vx,vy);
+  if(mag>1){vx/=mag;vy/=mag;}
+  player.moving = mag>0.15;
+  if(player.dodgeT>0){
+    player.dodgeT-=dt;
+    moveEntity(player, player.dodgeVX*dt, player.dodgeVY*dt);
+    // afterimage
+    particles.push({x:player.x,y:player.y-8,vx:0,vy:0,t:0.15,col:'#ffffff',sz:2});
+  } else if(player.moving){
+    const spd = B.PLAYER_SPEED;
+    const dx=vx*spd*dt, dy=vy*spd*dt;
+    moveEntity(player,dx,dy);
+    if(Math.abs(vx)>Math.abs(vy)) player.dir = vx>0?'right':'left';
+    else player.dir = vy>0?'down':'up';
+    player.animT+=dt;
+    if(player.animT>0.18){player.animT=0;player.frame=1-player.frame;}
+    if(activeHint&&activeHint.h.id===1)activeHint.movedPx+=Math.hypot(dx,dy);
+    stillFor=0;
+  } else { player.frame=0; stillFor+=dt; }
+  player.iframes=Math.max(0,player.iframes-dt);
+  player.flashT=Math.max(0,player.flashT-dt);
+  player.lastHitT+=dt;
+
+  /* movement window samples for Flow */
+  player.moveSamples.push({t:performance.now()/1000,x:player.x,y:player.y});
+  while(player.moveSamples.length>2 &&
+        player.moveSamples[0].t < performance.now()/1000 - B.FLOW_MOVE_WINDOW)
+    player.moveSamples.shift();
+  const ms0=player.moveSamples[0], msN=player.moveSamples[player.moveSamples.length-1];
+  const windowDist = Math.hypot(msN.x-ms0.x, msN.y-ms0.y);
+
+  /* --- Flow --- */
+  const near = nearestWolfDist();
+  const enemyNear = near < 6*16;
+  flowActive = !inT && player.lastHitT>=B.FLOW_DELAY && enemyNear
+               && windowDist>=B.FLOW_MOVE_PX;
+  if(flowActive) flowT+=dt; else flowT=0;
+  let flowMult=0, flowTier=0;
+  for(let i=0;i<B.FLOW_TIERS.length;i++)
+    if(flowT>=B.FLOW_TIERS[i][0]){flowMult=B.FLOW_TIERS[i][1];flowTier=i+1;}
+
+  /* --- Aether (§6.1) --- */
+  if(inT){
+    player.aether = Math.max(0, player.aether - 20*dt);   // decays in town
+  } else {
+    let enemiesIn6=0;
+    for(const w of wolves)if(w.hp>0 &&
+      Math.hypot(w.x-player.x,w.y-player.y)<6*16)enemiesIn6++;
+    let gain = B.AETHER_BASE;
+    gain += Math.min(enemiesIn6,B.AETHER_PROX_CAP)*B.AETHER_PROX;
+    gain += flowActive?B.AETHER_FLOW:0;
+    gain *= flowMult||1;
+    gain *= player.moving?1.0:B.AETHER_STILL;
+    player.aether = Math.min(player.aetherMax, player.aether + gain*dt);
+  }
+
+  /* --- auto-fire (§5.2) --- */
+  player.fireT -= dt;
+  if(!inT && player.fireT<=0){
+    let best=null, bd=B.SLING.range;
+    for(const w of wolves){
+      if(w.hp<=0)continue;
+      const d=Math.hypot(w.x-player.x,w.y-player.y);
+      if(d<bd){bd=d;best=w;}
+    }
+    if(best){
+      player.fireT = B.SLING.cd;
+      const a=Math.atan2(best.y-6-player.y+8, best.x-player.x);
+      projectiles.push({x:player.x,y:player.y-8,
+        vx:Math.cos(a)*B.SLING.speed, vy:Math.sin(a)*B.SLING.speed, t:0.8});
+      beep(700+R(-60,60),0.03,0.015,'triangle');
+    }
+  }
+
+  /* --- projectiles --- */
+  for(let i=projectiles.length-1;i>=0;i--){
+    const p=projectiles[i];
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.t-=dt;
+    let dead = p.t<=0 || solidAt(p.x,p.y);
+    if(!dead)for(const w of wolves){
+      if(w.hp<=0)continue;
+      if(Math.hypot(w.x-p.x,w.y-6-p.y)<7){
+        hurtWolf(w,B.SLING.dmg,player.x,player.y,1); dead=true; break;
+      }
+    }
+    if(dead)projectiles.splice(i,1);
+  }
+
+  /* --- wolves --- */
+  for(let i=wolves.length-1;i>=0;i--){
+    const w=wolves[i];
+    if(w.hp<=0){ w.deadT+=dt; if(w.deadT>1.2)wolves.splice(i,1); continue; }
+    w.flashT=Math.max(0,w.flashT-dt);
+    w.chill=Math.max(0,w.chill-dt);
+    w.animT+=dt; if(w.animT>0.15){w.animT=0;w.frame=1-w.frame;}
+    // knockback decay
+    if(Math.abs(w.lvx)>1||Math.abs(w.lvy)>1){
+      moveEntity(w,w.lvx*dt,w.lvy*dt);
+      w.lvx*=0.85; w.lvy*=0.85;
+    }
+    const dx=player.x-w.x, dy=player.y-w.y, d=Math.hypot(dx,dy)||1;
+    const slow = w.chill>0?B.NOVA.chillSlow:1;
+    const playerSafe = inTown(player.x,player.y);
+    if(playerSafe || d>150){
+      // idle wander
+      w.stT-=dt;
+      if(w.stT<=0){w.stT=R(1,3);w.wa=R(0,Math.PI*2);w.wm=rng()<0.6;}
+      if(w.wm){ const s=18*slow;
+        stepWolf(w, Math.cos(w.wa)*s*dt, Math.sin(w.wa)*s*dt); }
+      w.state='idle';
+    } else if(w.state==='lunge'){
+      w.lungeT-=dt;
+      stepWolf(w, w.lvx2*dt*slow, w.lvy2*dt*slow);
+      if(d<12){ hurtPlayer(6); w.state='circle'; w.cd=R(2,3.5); }
+      if(w.lungeT<=0){ w.state='circle'; w.cd=R(2,3.5); }
+    } else {
+      // circle at ~40px, drift in, occasional lunge
+      w.state='circle';
+      w.circA = Math.atan2(w.y-player.y, w.x-player.x)
+              + w.circDir*0.9*dt*slow;
+      const rad = Math.max(26, d-14*dt*20);
+      const tx = player.x+Math.cos(w.circA)*Math.min(d,44);
+      const ty = player.y+Math.sin(w.circA)*Math.min(d,44);
+      const ma=Math.atan2(ty-w.y,tx-w.x), s=46*slow;
+      stepWolf(w, Math.cos(ma)*s*dt, Math.sin(ma)*s*dt);
+      w.cd=(w.cd||R(1,2.5))-dt;
+      if(w.cd<=0 && d<70 && d>16){
+        w.state='lunge'; w.lungeT=0.45;
+        const la=Math.atan2(dy,dx);
+        w.lvx2=Math.cos(la)*150; w.lvy2=Math.sin(la)*150;
+      }
+      if(d<10) hurtPlayer(B.CONTACT_DPS*dt);   // contact is punishment
+    }
+    w.face = (player.x>w.x && !playerSafe)?1:(w.wm?Math.sign(Math.cos(w.wa))||1:w.face);
+    // never enter town
+    if(inTown(w.x,w.y)){
+      const a=Math.atan2(w.y-(town.y0+town.y1)/2, w.x-(town.x0+town.x1)/2);
+      w.x+=Math.cos(a)*40*dt; w.y+=Math.sin(a)*40*dt;
+    }
+  }
+  function stepWolf(w,dx,dy){ moveEntity(w,dx,dy); if(Math.abs(dx)>0.01)w.face=dx>0?1:-1; }
+
+  // respawn packs to keep field alive
+  if(wolves.filter(w=>w.hp>0).length<3){
+    respawnT-=dt;
+    if(respawnT<=0){ spawnWolfPack(R(58,74)*16, R(26,42)*16, RI(3,5)); respawnT=8; }
+  }
+
+  /* --- coins --- */
+  for(let i=coins.length-1;i>=0;i--){
+    const c=coins[i]; c.t+=dt;
+    c.x+=c.vx*dt; c.y+=c.vy*dt; c.vx*=0.9; c.vy*=0.9;
+    const d=Math.hypot(c.x-player.x,c.y-player.y);
+    if((c.t>B.COIN_MAGNET_DELAY && d<B.COIN_MAGNET_PX) || c.t>B.COIN_FORCE_COLLECT){
+      const a=Math.atan2(player.y-c.y,player.x-c.x);
+      const s=Math.max(140, 400-d*4);
+      c.x+=Math.cos(a)*s*dt; c.y+=Math.sin(a)*s*dt;
+    }
+    if(d<7){ coins.splice(i,1); player.coins++;
+      beep(1180,0.05,0.03); beep(1560,0.07,0.02); }
+  }
+
+  /* --- novas & particles --- */
+  for(let i=novas.length-1;i>=0;i--){
+    const n=novas[i]; n.t+=dt; n.r=n.rMax*Math.min(1,n.t/0.25);
+    if(n.t>0.45)novas.splice(i,1);
+  }
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i]; p.t-=dt;
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vx*=0.92; p.vy*=0.92;
+    if(p.t<=0)particles.splice(i,1);
+  }
+
+  shakeAether=Math.max(0,shakeAether-dt);
+  updateHints(dt);
+
+  /* --- camera: follow, whole-pixel round (§13.2) --- */
+  const tX = player.x - LW/2, tY = player.y - LH/2 - 8;
+  camX += (tX-camX)*Math.min(1,dt*6);
+  camY += (tY-camY)*Math.min(1,dt*6);
+  camX = Math.min(Math.max(camX,0), MW*16-LW);
+  camY = Math.min(Math.max(camY,0), MH*16-LH);
+}
+
+/* ---------------- render ------------------------------------- */
+let waterPhase=0;
+function render(dt){
+  waterPhase+=dt;
+  const cx = Math.round(camX), cy = Math.round(camY);
+  g.fillStyle=PAL.night; g.fillRect(0,0,LW,LH);
+
+  /* 1. ground tiles */
+  const tx0=Math.floor(cx/16), ty0=Math.floor(cy/16);
+  const tx1=Math.min(MW-1,tx0+Math.ceil(LW/16)+1), ty1=Math.min(MH-1,ty0+Math.ceil(LH/16)+1);
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+    const gid=ground[idx(tx,ty)];
+    g.drawImage(T[GT[gid]], tx*16-cx, ty*16-cy);
+  }
+
+  /* 3. water caustics (two scrolling lighten bands) */
+  g.save(); g.globalCompositeOperation='lighter'; g.globalAlpha=0.12;
+  g.fillStyle=PAL.waterLit;
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+    if(ground[idx(tx,ty)]!==GID.water)continue;
+    const px=tx*16-cx, py=ty*16-cy;
+    const o1=Math.floor((Math.sin(waterPhase*1.1+tx*0.9+ty*0.6)+1)*6);
+    const o2=Math.floor((Math.sin(waterPhase*0.7-tx*0.5+ty*1.1)+1)*6);
+    g.fillRect(px+o1%14, py+4, 3, 1);
+    g.fillRect(px+o2%13, py+11, 4, 1);
+  }
+  g.restore();
+
+  /* town bounds hint: faint dashed edge (dev aid, subtle) */
+  g.save(); g.globalAlpha=0.10; g.strokeStyle='#ffffff';
+  g.setLineDash([3,5]);
+  g.strokeRect(town.x0-cx, town.y0-cy, town.x1-town.x0, town.y1-town.y0);
+  g.setLineDash([]); g.restore();
+
+  /* 4. blob shadows (directional shadows land in P4) */
+  g.save(); g.globalAlpha=0.28; g.fillStyle='#000';
+  function blob(x,y,w){ g.beginPath();
+    g.ellipse(Math.round(x-cx),Math.round(y-cy),w,Math.max(2,w*0.45),0,0,Math.PI*2);
+    g.fill(); }
+  blob(player.x,player.y+1,6);
+  for(const w of wolves)if(w.hp>0)blob(w.x,w.y+1,7);
+  for(const t of trees)blob(t.x,t.y-1,7);
+  g.restore();
+
+  /* 5. y-sorted entities & props */
+  const draws=[];
+  // buildings (drawn as wall+roof blocks; sort by base y)
+  for(const b of buildings){
+    draws.push({y:(b.ty+b.th)*16, fn:()=>drawBuilding(b,cx,cy)});
+  }
+  for(const t of trees) draws.push({y:t.y, fn:()=>drawTree(t,cx,cy)});
+  for(const w of wolves) draws.push({y:w.y, fn:()=>drawWolf(w,cx,cy)});
+  draws.push({y:player.y, fn:()=>drawPlayer(cx,cy)});
+  draws.sort((a,b)=>a.y-b.y);
+  for(const d of draws)d.fn();
+
+  /* projectiles / novas / coins / particles */
+  g.fillStyle='#d8d2c4';
+  for(const p of projectiles)
+    g.fillRect(Math.round(p.x-cx)-1,Math.round(p.y-cy)-1,2,2);
+  for(const n of novas){
+    g.save(); g.globalAlpha=Math.max(0,1-n.t/0.45);
+    g.strokeStyle=PAL.frost; g.lineWidth=2;
+    g.beginPath(); g.arc(Math.round(n.x-cx),Math.round(n.y-cy),n.r,0,Math.PI*2); g.stroke();
+    g.globalAlpha*=0.3; g.fillStyle=PAL.frost;
+    g.beginPath(); g.arc(Math.round(n.x-cx),Math.round(n.y-cy),n.r,0,Math.PI*2); g.fill();
+    g.restore();
+  }
+  for(const c of coins){
+    g.fillStyle=PAL.coinDark;
+    g.fillRect(Math.round(c.x-cx)-2,Math.round(c.y-cy)-2,4,4);
+    g.fillStyle=PAL.coin;
+    g.fillRect(Math.round(c.x-cx)-1,Math.round(c.y-cy)-2,2,3);
+  }
+  for(const p of particles){
+    g.globalAlpha=Math.min(1,p.t*3);
+    g.fillStyle=p.col;
+    g.fillRect(Math.round(p.x-cx),Math.round(p.y-cy),p.sz||1,p.sz||1);
+    g.globalAlpha=1;
+  }
+
+  /* town lamps: warm glow discs (full lighting pass lands in P4) */
+  g.save(); g.globalCompositeOperation='lighter';
+  for(const l of lamps){
+    const lx=l.x-cx, ly=l.y-cy;
+    const grd=g.createRadialGradient(lx,ly,2,lx,ly,26);
+    grd.addColorStop(0,'rgba(255,214,140,0.20)');
+    grd.addColorStop(1,'rgba(255,214,140,0)');
+    g.fillStyle=grd; g.fillRect(lx-26,ly-26,52,52);
+    g.fillStyle='#3a2f1e'; g.fillRect(lx-1,ly-8,2,9);
+    g.fillStyle=PAL.window; g.fillRect(lx-2,ly-11,4,4);
+  }
+  g.restore();
+
+  drawHUD();
+  drawTouch();
+
+  /* blit logical -> screen, integer scale, letterboxed */
+  sc.fillStyle='#000'; sc.fillRect(0,0,cv.width,cv.height);
+  sc.drawImage(logical,0,0,LW,LH,OX,OY,LW*SCALE,LH*SCALE);
+}
+
+function drawBuilding(b,cx,cy){
+  const x=b.tx*16-cx, y=b.ty*16-cy, w=b.tw*16, h=b.th*16;
+  // walls (lower half)
+  for(let i=0;i<b.tw;i++)
+    g.drawImage(T.wall, x+i*16, y+h-16);
+  // roof
+  g.fillStyle=PAL.roofA; g.fillRect(x,y-8,w,h-12);
+  g.fillStyle=PAL.roofB;
+  for(let ry=y-8;ry<y+h-12-8;ry+=6) g.fillRect(x,ry+3,w,2);
+  g.fillStyle=PAL.roofRidge; g.fillRect(x,y-8,w,2);
+  g.fillRect(x,y+h-12-9,w,2);
+  // door + windows
+  const dx=b.door*16-cx;
+  g.fillStyle=PAL.door; g.fillRect(dx+4,y+h-13,8,13);
+  g.fillStyle=PAL.window;
+  if(b.tw>4){ g.fillRect(x+6,y+h-12,5,5); g.fillRect(x+w-11,y+h-12,5,5); }
+}
+
+function drawTree(t,cx,cy){
+  const x=Math.round(t.x-cx), y=Math.round(t.y-cy);
+  g.fillStyle=PAL.treeTrunk; g.fillRect(x-2,y-10,4,10);
+  const s=t.seed;
+  g.fillStyle=PAL.treeLeafA;
+  g.fillRect(x-7,y-24+(s%2),14,13);
+  g.fillStyle=PAL.treeLeafB;
+  g.fillRect(x-5,y-27,10,6);
+  g.fillRect(x-8,y-18,4,5);
+  g.fillRect(x+4,y-16,4,4);
+}
+
+function drawWolf(w,cx,cy){
+  const x=Math.round(w.x-cx), y=Math.round(w.y-cy);
+  g.save();
+  if(w.hp<=0){ g.globalAlpha=Math.max(0,1-w.deadT/1.2); }
+  g.translate(x,y);
+  if(w.face<0)g.scale(-1,1);
+  g.drawImage(WOLF_SPR[w.frame],-9,-11);
+  g.restore();
+  if(w.flashT>0){
+    g.save(); g.globalAlpha=w.flashT*8; g.globalCompositeOperation='lighter';
+    g.fillStyle='#fff'; g.fillRect(x-9,y-11,18,12); g.restore();
+  }
+  if(w.chill>0){
+    g.fillStyle=PAL.frost;
+    g.fillRect(x-6,y-13,2,2); g.fillRect(x+4,y-14,2,2); g.fillRect(x-1,y-15,2,2);
+  }
+  if(w.hp>0&&w.hp<w.hpMax){
+    g.fillStyle='#000'; g.fillRect(x-7,y-16,14,2);
+    g.fillStyle=PAL.hp; g.fillRect(x-7,y-16,Math.round(14*w.hp/w.hpMax),2);
+  }
+}
+
+function drawPlayer(cx,cy){
+  const x=Math.round(player.x-cx), y=Math.round(player.y-cy);
+  const spr=player.spr[player.dir][player.moving?player.frame:0];
+  if(player.iframes>0 && Math.floor(performance.now()/60)%2)return; // i-frame blink
+  g.drawImage(spr, x-8, y-19);
+  if(player.flashT>0){
+    g.save();g.globalAlpha=player.flashT*5;g.globalCompositeOperation='lighter';
+    g.fillStyle='#f00';g.fillRect(x-8,y-19,16,20);g.restore();
+  }
+  // flow rim light
+  if(flowT>=B.FLOW_TIERS[0][0]){
+    let col=PAL.aether;
+    if(flowT>=35)col=PAL.flow4; else if(flowT>=20)col=PAL.flow3;
+    else if(flowT>=10)col=PAL.flow2;
+    g.save(); g.globalAlpha=0.5+0.3*Math.sin(performance.now()/150);
+    g.strokeStyle=col; g.lineWidth=1;
+    g.beginPath(); g.ellipse(x,y+1,8,4,0,0,Math.PI*2); g.stroke(); g.restore();
+  }
+}
+
+/* ---------------- HUD ---------------------------------------- */
+function drawHUD(){
+  const pad=4;
+  g.font='7px monospace'; g.textBaseline='top';
+  // HP
+  g.fillStyle=PAL.hpBack; g.fillRect(pad,pad,52,6);
+  g.fillStyle=PAL.hp; g.fillRect(pad,pad,Math.round(52*player.hp/player.hpMax),6);
+  g.strokeStyle='#00000066'; g.strokeRect(pad+0.5,pad+0.5,52,6);
+  // Aether
+  const ax = pad, ay = pad+9;
+  const shk = shakeAether>0 ? Math.round(Math.sin(performance.now()/25)*2) : 0;
+  g.fillStyle=PAL.aetherBack; g.fillRect(ax+shk,ay,52,5);
+  const full = player.aether>=player.aetherMax-0.5;
+  g.fillStyle = full?PAL.aetherHi:PAL.aether;
+  g.fillRect(ax+shk,ay,Math.round(52*player.aether/player.aetherMax),5);
+  g.fillStyle=PAL.hud;
+  g.fillText('\u25cd '+Math.floor(player.aether), ax+56+shk, ay-1);
+  // flow tier
+  if(flowT>=4){
+    let label='FLOW'; if(flowT>=35)label='ASCENDANT';
+    else if(flowT>=20)label='FLOW III'; else if(flowT>=10)label='FLOW II';
+    g.fillStyle=PAL.flow3; g.fillText(label, pad, ay+8);
+  }
+  // clock + day
+  const hh=Math.floor(gameT/60)%24, mm=Math.floor(gameT%60);
+  const clock=('0'+hh).slice(-2)+':'+('0'+mm).slice(-2);
+  g.fillStyle=PAL.hudDim;
+  const cw=g.measureText('Day '+dayN+'  '+clock).width;
+  g.fillText('Day '+dayN+'  '+clock, LW-cw-pad, pad);
+  // coins
+  g.fillStyle=PAL.coin;
+  const cs='\u25c9 '+player.coins;
+  g.fillText(cs, LW-g.measureText(cs).width-pad, pad+9);
+  // town-safe banner
+  if(inTown(player.x,player.y)){
+    g.fillStyle=PAL.hudDim;
+    const s='HAVENBROOK \u2014 SAFE';
+    g.fillText(s,(LW-g.measureText(s).width)/2, pad);
+  }
+  // hint band (§4.1: one line, top, never a modal)
+  if(activeHint){
+    const a = activeHint.leaving!==undefined?Math.max(0,activeHint.leaving*2):1;
+    const txt = activeHint.h.text;
+    g.save(); g.globalAlpha=a*0.85;
+    const w = g.measureText(txt).width+12;
+    const bx=(LW-w)/2, by=14;
+    g.fillStyle='#000'; g.fillRect(bx,by,w,11);
+    g.globalAlpha=a; g.fillStyle=PAL.hud;
+    const pulse = activeHint.t>B.HINT_ESCALATE_S && Math.floor(performance.now()/400)%2;
+    if(pulse)g.fillStyle='#ffe9a0';
+    g.fillText(txt, bx+6, by+2);
+    g.restore();
+  }
+}
+
+/* touch overlays: stick + buttons */
+function drawTouch(){
+  // stick
+  if(stick.active){
+    g.save(); g.globalAlpha=0.25;
+    g.strokeStyle='#fff'; g.lineWidth=1;
+    g.beginPath(); g.arc(stick.ox,stick.oy,26,0,Math.PI*2); g.stroke();
+    g.globalAlpha=0.4; g.fillStyle='#fff';
+    g.beginPath(); g.arc(stick.ox+stick.dx,stick.oy+stick.dy,9,0,Math.PI*2); g.fill();
+    g.restore();
+  }
+  // buttons
+  for(const k in buttons){
+    const b=buttons[k];
+    let on=true, ring=0;
+    if(k==='A'){ on = player.aether>=B.NOVA.cost && !inTown(player.x,player.y);
+      ring = Math.min(1, player.aether/B.NOVA.cost); }
+    if(k==='C'){ on = player.aether>=B.DODGE_COST; }
+    if(k==='D'){ on = false; }
+    g.save();
+    g.globalAlpha = on?0.55:0.22;
+    g.fillStyle = '#101418';
+    g.beginPath(); g.arc(b.x,b.y,b.r,0,Math.PI*2); g.fill();
+    g.strokeStyle = on?PAL.aether:'#555';
+    g.lineWidth=1.5;
+    if(k==='A'&&on&&Math.floor(performance.now()/350)%2)
+      g.strokeStyle=PAL.aetherHi;                     // pulse when affordable
+    g.beginPath(); g.arc(b.x,b.y,b.r,0,Math.PI*2); g.stroke();
+    if(k==='A'&&ring>0&&ring<1){
+      g.strokeStyle=PAL.aether; g.globalAlpha=0.5;
+      g.beginPath(); g.arc(b.x,b.y,b.r+3,-Math.PI/2,-Math.PI/2+ring*Math.PI*2); g.stroke();
+    }
+    g.globalAlpha = on?0.9:0.35;
+    g.fillStyle=PAL.hud; g.font='8px monospace';
+    const lw=g.measureText(b.label).width;
+    g.fillText(b.label, b.x-lw/2, b.y-4);
+    g.restore();
+  }
+}
+
+/* ---------------- fixed 60 Hz loop ---------------------------- */
+let last=performance.now(), acc=0;
+function frame(now){
+  let ft = now-last; last=now;
+  if(ft>100)ft=100;
+  acc+=ft;
+  const STEP=1000/60;
+  while(acc>=STEP){ update(STEP/1000); acc-=STEP; }
+  render(ft/1000);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
