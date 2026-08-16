@@ -18,7 +18,11 @@
 <script>
 'use strict';
 /* ============================================================
-   WAYFARER — P1 v11 (spec v3.4)
+   WAYFARER — P1 v12 (spec v3.4)
+   v12: title screen (Continue / New Journey with save wipe), a real death flow
+       (fall, lose a quarter of your coin, wake at the Havenbrook tavern next
+       morning), per-branch weather (snow, leaves, rain, dust) with branch hues,
+       and light ambient audio cues.
    v11: organic map borders (per-column rim profiles with shelves and bays, gates
        carved through the true thickness), camera zoomed out ~13%, all UI text
        up from 7px to 9px with every box re-fitted.
@@ -432,6 +436,10 @@ const buildings=[], trees=[], lamps=[], props=[], wallTiles=[], glints=[], decor
 const cliffs=[], rocks=[], npcs=[], doors=[], chests=[];
 let exits=[];
 let interiorSave=null;
+let titleUI={on:true, hasSave:false, rects:{}};
+let deathSeq=null;
+let weather=null;
+let ambientT=6;
 let minimapCv=null;
 function buildMinimap(){
   const [c,x]=mkCanvas(MW,MH);
@@ -717,6 +725,7 @@ function genInterior(b){
        'You came in off the road? Brave or fool, then.'][RI(0,2)],false));
   }
   lamps.push({x:cx*16+8, y:2*16+8});
+  weather=null;
 }
 function mkNpc(tx,ty,name,line,fixed,role){
   return {x:tx*16+8, y:ty*16+12, dir:'down', frame:0, animT:0, moving:false,
@@ -1055,6 +1064,7 @@ function genDecor(){
     }
   }
   buildMinimap();
+  initWeather();
   for(const t of trees){
     if(rng()<0.3){
       const mx=t.x+RI(-10,10), my=t.y+RI(2,9);
@@ -1932,7 +1942,9 @@ function updateHints(dt){
 /* ---------------- input ------------------------------------------ */
 const stick = {active:false, id:-1, ox:0, oy:0, dx:0, dy:0};
 const keys = {};
-window.addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;
+window.addEventListener('keydown',e=>{
+  if(titleUI.on && (e.key==='Enter'||e.key===' ')){ titleUI.on=false; beep(700,0.09,0.05,'triangle'); return; }
+  keys[e.key.toLowerCase()]=true;
   if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase()))e.preventDefault();});
 window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
 
@@ -1965,6 +1977,7 @@ cv.addEventListener('pointerdown',e=>{
     try{ const el=document.documentElement;
       if(el.requestFullscreen) el.requestFullscreen().catch(()=>{}); }catch(_){}}
   const p=toLogical(e);
+  if(titleUI.on){ titleTap(p); return; }
   if(ui){ uiTap(p); return; }
   for(const k in buttons){const b=buttons[k];
     if(k==='E' && !contextAction()) continue;
@@ -2015,6 +2028,30 @@ function beep(freq,dur,vol,type){
 /* ---------------- actions ------------------------------------------ */
 let shakeAether=0;
 let shakeT=0;
+
+function resetRun(){
+  wipeSave();
+  player.coins=0; player.bandages=1; player.kills=0;
+  player.gear={sling:0,armor:0,boots:0,focus:0};
+  seals={}; epilogue=false; bounty=null; renown=0; party=[];
+  dayN=1; gameT=8*60;
+  player.hpMax=maxHp(); player.hp=player.hpMax; player.aether=0;
+  applyTravel({branch:null, depth:0, entryDir:'S'});
+  player.x=RX*16+8; player.y=(RY+3)*16+8;
+  camX=Math.max(0,Math.min(player.x-LW/2,MW*16-LW));
+  camY=Math.max(0,Math.min(player.y-LH/2,MH*16-LH));
+  banner={name:'HAVENBROOK VALE', sub:'A NEW JOURNEY', t:0};
+}
+
+function initWeather(){
+  weather=null;
+  if(region.interior || region.depth<=0 || !region.branch) return;
+  const type={N:'snow',E:'leaves',S:'rain',W:'dust'}[region.branch];
+  const n = type==='rain'?70 : type==='snow'?55 : 40;
+  const ps=[];
+  for(let i=0;i<n;i++)ps.push({x:R(0,LW),y:R(0,LH),ph:R(0,6.28),sp:R(0.6,1.5)});
+  weather={type, ps};
+}
 function tryDodge(){
   if(player.dodgeT>0) return;
   if(player.aether < dodgeCost()){ shakeAether=0.4; return; }
@@ -2115,11 +2152,12 @@ function hurtPlayer(dmg){
   player.flashT = 0.15;
   player.iframes = 0.5;
   beep(140,0.15,0.07,'sawtooth');
-  if(player.hp<=0){
-    player.hpMax = maxHp();
-    player.hp = player.hpMax; player.aether=0;
-    player.coins = Math.floor(player.coins*0.75);
-    player.x=RX*16+8; player.y=(RY+3)*16+8;
+  if(player.hp<=0 && !deathSeq){
+    player.hp=0;
+    deathSeq={t:0, phase:'fall'};
+    banner=null; toast=null; ui=null;
+    shakeT=Math.max(shakeT,0.4);
+    beep(110,0.9,0.07,'sawtooth');
   }
 }
 
@@ -2127,6 +2165,37 @@ function hurtPlayer(dmg){
 let camX=0, camY=0;
 function update(dt){
   if(toast){ toast.t+=dt; if(toast.t>2.8) toast=null; }
+  if(titleUI.on) return;
+  if(deathSeq){
+    deathSeq.t+=dt;
+    if(deathSeq.phase==='fall' && deathSeq.t>1.8){
+      deathSeq={t:0, phase:'wake'};
+      player.coins=Math.floor(player.coins*0.75);
+      player.hpMax=maxHp(); player.hp=player.hpMax; player.aether=0;
+      for(const p of party){
+        p.hp=Math.max(p.hp,Math.round(p.hpMax*0.5)); p.downT=0; p.reviveT=0;
+      }
+      applyTravel({branch:null, depth:0, entryDir:'S'});
+      const tav=buildings.find(b=>b.kind==='tavern');
+      if(tav){ player.x=tav.door*16+8; player.y=(tav.ty+tav.th+1)*16+8; }
+      regroupParty();
+      gameT=7*60; dayN++;
+      banner={name:'YOU WAKE IN HAVENBROOK', sub:'THE ROAD KEPT A QUARTER OF YOUR COIN', t:0};
+      saveGame();
+    } else if(deathSeq.phase==='wake' && deathSeq.t>0.4){
+      deathSeq=null;
+    }
+    if(deathSeq && deathSeq.phase==='fall'){ shakeT=Math.max(0,shakeT-dt); return; }
+  }
+  ambientT-=dt;
+  if(ambientT<=0){
+    ambientT=R(9,20);
+    const L2=lightLevel();
+    if(region.interior){ /* hearth crackle */ if(rng()<0.5)beep(160,0.05,0.012,'square'); }
+    else if(region.depth===0 && L2>0.75){ beep(1560,0.05,0.012,'sine'); beep(1780,0.07,0.010,'sine'); }
+    else if(region.depth>0 && L2<0.5){ beep(185,0.7,0.02,'sawtooth'); }
+    else if(region.branch==='N'){ beep(88,0.9,0.016,'triangle'); }
+  }
   if(ui) return;
   if(fade){
     fade.t+=dt;
@@ -3036,6 +3105,38 @@ function render(dt){
   if(region.depth>0){
     g.fillStyle='rgba(18,12,24,'+Math.min(0.30,0.065*region.depth).toFixed(3)+')';
     g.fillRect(0,0,LW,LH);
+    const hue={N:'rgba(200,220,255,0.06)', E:'rgba(24,64,24,0.07)',
+               S:'rgba(70,100,90,0.09)',  W:'rgba(130,96,44,0.06)'}[region.branch];
+    if(hue){ g.fillStyle=hue; g.fillRect(0,0,LW,LH); }
+  }
+  if(weather && !region.interior){
+    const wdt=Math.min(0.05,dt||0.016)*60;
+    g.save();
+    for(const p of weather.ps){
+      if(weather.type==='snow'){
+        p.x-=(p.sp*0.35+Math.sin(performance.now()/900+p.ph)*0.3)*wdt;
+        p.y+=p.sp*0.55*wdt;
+        g.globalAlpha=0.75; g.fillStyle='#eef4fa';
+        g.fillRect(Math.round(p.x),Math.round(p.y),1,1);
+      } else if(weather.type==='rain'){
+        p.x-=1.1*p.sp*wdt; p.y+=4.4*p.sp*wdt;
+        g.globalAlpha=0.45; g.fillStyle='#9ab8d0';
+        g.fillRect(Math.round(p.x),Math.round(p.y),1,3);
+      } else if(weather.type==='leaves'){
+        p.x+=(Math.sin(performance.now()/700+p.ph)*0.8-0.15)*wdt;
+        p.y+=p.sp*0.45*wdt;
+        g.globalAlpha=0.7;
+        g.fillStyle=(p.ph>3.14)?'#7a9a3e':'#a67c3a';
+        g.fillRect(Math.round(p.x),Math.round(p.y),2,1);
+      } else {
+        p.x+=p.sp*0.4*wdt; p.y+=Math.sin(performance.now()/1100+p.ph)*0.12*wdt;
+        g.globalAlpha=0.35; g.fillStyle='#c9b08a';
+        g.fillRect(Math.round(p.x),Math.round(p.y),1,1);
+      }
+      if(p.x<-3)p.x+=LW+6; if(p.x>LW+3)p.x-=LW+6;
+      if(p.y>LH+3)p.y-=LH+6; if(p.y<-3)p.y+=LH+6;
+    }
+    g.restore();
   }
 
   /* night lights: lamps, windows, glints — punched over the dark */
@@ -3090,11 +3191,28 @@ function render(dt){
   drawTouch();
 
   if(ui) drawShop();
+  if(deathSeq && deathSeq.phase==='fall'){
+    const a=Math.min(0.85, deathSeq.t*0.9);
+    g.fillStyle='rgba(4,4,8,'+a.toFixed(3)+')'; g.fillRect(0,0,LW,LH);
+    if(deathSeq.t>0.4){
+      g.save(); g.globalAlpha=Math.min(1,(deathSeq.t-0.4)*2);
+      g.font='16px monospace'; g.textBaseline='top';
+      const t1='YOU FELL';
+      g.fillStyle='#c94b3c';
+      g.fillText(t1,(LW-g.measureText(t1).width)/2, LH/2-16);
+      g.font='9px monospace'; g.fillStyle=PAL.hudDim;
+      const t2='the pack moves on';
+      g.fillText(t2,(LW-g.measureText(t2).width)/2, LH/2+4);
+      g.restore();
+    }
+  }
 
   if(fade){
     const a = fade.phase==='out'?Math.min(1,fade.t/0.32):Math.max(0,1-fade.t/0.32);
     g.fillStyle='rgba(0,0,0,'+a.toFixed(3)+')'; g.fillRect(0,0,LW,LH);
   }
+
+  if(titleUI.on) drawTitle();
 
   sc.fillStyle='#000'; sc.fillRect(0,0,cv.width,cv.height);
   sc.drawImage(logical,0,0,LW,LH,OX,OY,LW*SCALE,LH*SCALE);
@@ -3760,6 +3878,60 @@ function drawPlayer(cx,cy){
   }
 }
 
+/* ---------------- title screen ------------------------------------------ */
+function drawTitle(){
+  g.fillStyle='rgba(6,8,14,0.82)'; g.fillRect(0,0,LW,LH);
+  g.textBaseline='top';
+  /* wordmark, spaced by hand */
+  const word='WAYFARER';
+  g.font='18px monospace';
+  let tw=0; for(const ch of word) tw+=g.measureText(ch).width+3;
+  let x0=(LW-tw)/2, y0=Math.round(LH*0.26);
+  for(const ch of word){
+    g.fillStyle='#1a1006'; g.fillText(ch, x0+1, y0+2);
+    g.fillStyle='#e8c85a'; g.fillText(ch, x0, y0);
+    x0+=g.measureText(ch).width+3;
+  }
+  g.font='9px monospace';
+  const sub='the four roads';
+  g.fillStyle=PAL.hudDim;
+  g.fillText(sub,(LW-g.measureText(sub).width)/2, y0+22);
+  /* buttons */
+  const bw=118, bh=17;
+  titleUI.rects={};
+  function btn(key,label,y,accent){
+    const bx=(LW-bw)/2;
+    titleUI.rects[key]={x:bx,y:y,w:bw,h:bh};
+    g.fillStyle='rgba(40,48,62,0.9)'; g.fillRect(bx,y,bw,bh);
+    g.fillStyle=accent; g.fillRect(bx,y,2,bh);
+    g.fillStyle=PAL.hud;
+    g.fillText(label, bx+(bw-g.measureText(label).width)/2, y+4);
+  }
+  const by0=Math.round(LH*0.55);
+  if(titleUI.hasSave){
+    btn('continue','CONTINUE', by0, PAL.aether);
+    btn('new','NEW JOURNEY', by0+24, '#c94b3c');
+    g.font='9px monospace';
+    const w2='renown \u2691'+renown+'   seals '+sealCount()+'/4   \u25c9'+player.coins;
+    g.fillStyle=PAL.hudDim;
+    g.fillText(w2,(LW-g.measureText(w2).width)/2, by0-16);
+  } else {
+    btn('begin','BEGIN', by0, PAL.aether);
+  }
+  const vs='v12';
+  g.fillStyle='#4a4a44';
+  g.fillText(vs, LW-g.measureText(vs).width-4, LH-12);
+}
+function titleTap(p){
+  for(const k in titleUI.rects){
+    const r=titleUI.rects[k];
+    if(p.x<r.x-4||p.x>r.x+r.w+4||p.y<r.y-4||p.y>r.y+r.h+4)continue;
+    if(k==='new'){ resetRun(); titleUI.on=false; beep(520,0.12,0.05,'triangle'); }
+    else { titleUI.on=false; beep(700,0.09,0.05,'triangle'); }
+    return;
+  }
+}
+
 /* ---------------- shop panel ------------------------------------------- */
 function uiRows(){
   if(!ui) return [];
@@ -4044,7 +4216,7 @@ function drawTouch(){
 
 /* ---------------- fixed 60 Hz loop -------------------------------------- */
 /* restore any earlier run before the first frame */
-try{ if(loadGame()) say('Welcome back.'); }catch(_){}
+try{ titleUI.hasSave = loadGame(); }catch(_){}
 
 let last=performance.now(), acc=0;
 let autosaveT=0;
