@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0a0c10">
-<title>WAYFARER — P1 Skeleton</title>
+<title>WAYFARER</title>
 <style>
   html,body{margin:0;padding:0;background:#0a0c10;height:100%;overflow:hidden;
     touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
@@ -16,15 +16,16 @@
 <script>
 'use strict';
 /* ============================================================
-   WAYFARER — Build Phase P1 (skeleton) + P3 taste (kiting core)
-   Spec v3.4. Canvas 2D, zero deps, procedural art, touch-first.
-   P1: loop, atlas, tilemap, camera, collision, paper doll,
-       test town (safe), touch stick + buttons.
-   P3 taste: sling auto-fire, wolves, Aether, Flow, dodge,
-       Frost Nova, coins, hints 1-5.
+   WAYFARER — P1 skeleton v2 (spec v3.4)
+   v2: 2x zoom (240x135 logical) · Havenbrook ring per §11.5:
+   wall + gates, the Verge (lamps, stone rail), 6-tile moat,
+   4 bridges, cleared outer bank, night spectators + eye glints.
+   Building variety: thatch/slate/shingle roofs, timber walls,
+   chimneys + smoke, night window glow, tavern sign, well,
+   market stall, barrels, fences, gardens. Day/night tint.
    ============================================================ */
 
-/* ---------------- constants (subset of Appendix B) ---------- */
+/* ---------------- constants ---------------------------------- */
 const B = {
   TILE:16, DAY_MS:20*60*1000,
   PLAYER_SPEED:62,
@@ -33,24 +34,25 @@ const B = {
   FLOW_DELAY:4.0, FLOW_MOVE_PX:40, FLOW_MOVE_WINDOW:1.5,
   FLOW_TIERS:[[4,1.0],[10,1.4],[20,1.9],[35,2.5]],
   DODGE_COST:25, DODGE_IFRAMES:12,
-  CONTACT_DPS:4, MAX_HOSTILES:8,
+  CONTACT_DPS:4,
   SLING:{dmg:6, cd:0.55, range:90, speed:230},
   NOVA:{cost:35, radiusT:3, dmg:30, chillDur:4, chillSlow:0.5},
   COIN_MAGNET_PX:40, COIN_MAGNET_DELAY:0.4, COIN_FORCE_COLLECT:8,
-  HINT_ESCALATE_S:25, HINT_GIVEUP_S:60
+  HINT_ESCALATE_S:25, HINT_GIVEUP_S:60,
+  SPECTATOR_CAP:16, GLINT_COUNT:46
 };
 
-/* ---------------- canvas / integer scaling ------------------ */
+/* ---------------- canvas / integer scaling ------------------- */
 const cv = document.getElementById('cv');
 const sc = cv.getContext('2d');
 const logical = document.createElement('canvas');
 const g = logical.getContext('2d');
-let LW=480, LH=270, SCALE=1, OX=0, OY=0, PORTRAIT=false;
+let LW=240, LH=135, SCALE=1, OX=0, OY=0, PORTRAIT=false;
 
 function resize(){
   const w = window.innerWidth, h = window.innerHeight;
   PORTRAIT = h > w;
-  LW = PORTRAIT?270:480; LH = PORTRAIT?480:270;
+  LW = PORTRAIT?135:240; LH = PORTRAIT?240:135;   // 2x zoom vs v1
   logical.width = LW; logical.height = LH;
   const dpr = Math.min(window.devicePixelRatio||1, 3);
   cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
@@ -64,7 +66,7 @@ function resize(){
 window.addEventListener('resize', resize);
 resize();
 
-/* ---------------- rng --------------------------------------- */
+/* ---------------- rng ----------------------------------------- */
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;
   let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;
   return((t^t>>>14)>>>0)/4294967296}}
@@ -72,15 +74,19 @@ const rng = mulberry32(20260815);
 const R = (a,b)=>a+rng()*(b-a);
 const RI = (a,b)=>Math.floor(R(a,b+1));
 
-/* ---------------- palette ----------------------------------- */
+/* ---------------- palette -------------------------------------- */
 const PAL = {
   grassA:'#4a7a3a', grassB:'#437237', grassC:'#528444',
+  bank:'#5d7444', bankB:'#556c3e',
   road:'#8a7150', roadEdge:'#7a6244',
-  waterDeep:'#1d4e6e', water:'#2a6b8f', waterLit:'#4a93b5',
-  sand:'#c2ab7a',
-  wall:'#8d8578', wallDark:'#6e675c',
-  roofA:'#a0522d', roofB:'#8c4626', roofRidge:'#6e3213',
-  door:'#5a3a1e', window:'#ffd98a',
+  water:'#266184', waterLit:'#4a93b5',
+  plank:'#8a6a42', plankD:'#74562f',
+  stone:'#8d8578', stoneD:'#6e675c', stoneL:'#a29a8c',
+  plaster:'#d8cbb0', beam:'#6b543a',
+  thatch:'#c9a54a', thatchD:'#ad8b36', thatchR:'#8a6d24',
+  slate:'#5f6f83', slateD:'#4e5c6e', slateR:'#3d4756',
+  shingle:'#a0522d', shingleD:'#8c4626', shingleR:'#6e3213',
+  door:'#5a3a1e', win:'#ffd98a', winDay:'#7a90a8',
   treeTrunk:'#5a4028', treeLeafA:'#2e5d2a', treeLeafB:'#3a6f33',
   skin:'#e8b98a', hair:'#4a2f1a', tunic:'#3f6d8e', legs:'#41382c', belt:'#7a5a2e',
   wolfA:'#6f6a63', wolfB:'#585349', wolfEye:'#ffd24a',
@@ -89,14 +95,14 @@ const PAL = {
   hp:'#c94b3c', hpBack:'#3a201c',
   aether:'#7ad0ff', aetherHi:'#c8f0ff', aetherBack:'#12303f',
   flow2:'#9ae0ff', flow3:'#c0ecff', flow4:'#eefaff',
-  frost:'#9adcff', night:'#0a0c10'
+  frost:'#9adcff', smoke:'#b8b2a6',
+  crop:'#7a9a3e', flower1:'#e06a7a', flower2:'#e8c85a', flower3:'#c07ae0'
 };
 
-/* ---------------- procedural atlas -------------------------- */
+/* ---------------- procedural atlas ------------------------------ */
 function mkCanvas(w,h){const c=document.createElement('canvas');c.width=w;c.height=h;
   const x=c.getContext('2d');x.imageSmoothingEnabled=false;return[c,x]}
-
-const T = {}; // tile sprites, 16x16
+const T = {};
 (function buildTiles(){
   const arng = mulberry32(7);
   function tile(name, fn){const [c,x]=mkCanvas(16,16);fn(x);T[name]=c;}
@@ -106,42 +112,38 @@ const T = {}; // tile sprites, 16x16
     speck(x,PAL.grassC,6);speck(x,PAL.grassB,5);});
   tile('grass1',x=>{x.fillStyle=PAL.grassB;x.fillRect(0,0,16,16);
     speck(x,PAL.grassA,7);speck(x,PAL.grassC,3);});
+  tile('bank',x=>{x.fillStyle=PAL.bank;x.fillRect(0,0,16,16);
+    speck(x,PAL.bankB,7);speck(x,'#6a8050',4);});
   tile('road',x=>{x.fillStyle=PAL.road;x.fillRect(0,0,16,16);
     speck(x,PAL.roadEdge,8);speck(x,'#9c8460',4);});
-  tile('water',x=>{x.fillStyle=PAL.water;x.fillRect(0,0,16,16);});
-  tile('sand',x=>{x.fillStyle=PAL.sand;x.fillRect(0,0,16,16);
-    speck(x,'#b0996a',5);});
+  tile('water',x=>{x.fillStyle=PAL.water;x.fillRect(0,0,16,16);
+    speck(x,'#215878',5);});
+  tile('plank',x=>{x.fillStyle=PAL.plank;x.fillRect(0,0,16,16);
+    x.fillStyle=PAL.plankD;x.fillRect(0,3,16,1);x.fillRect(0,8,16,1);x.fillRect(0,13,16,1);
+    x.fillRect(5,0,1,3);x.fillRect(11,4,1,4);x.fillRect(3,9,1,4);});
   tile('floor',x=>{x.fillStyle='#b0a284';x.fillRect(0,0,16,16);
     x.fillStyle='#a5977a';x.fillRect(0,7,16,1);x.fillRect(7,0,1,7);x.fillRect(11,8,1,8);});
-  tile('wall',x=>{x.fillStyle=PAL.wall;x.fillRect(0,0,16,16);
-    x.fillStyle=PAL.wallDark;x.fillRect(0,5,16,1);x.fillRect(0,11,16,1);
-    x.fillRect(5,0,1,5);x.fillRect(10,6,1,5);x.fillRect(3,12,1,4);});
+  tile('cobble',x=>{x.fillStyle='#9a917f';x.fillRect(0,0,16,16);
+    x.fillStyle='#877e6d';
+    x.fillRect(1,1,6,5);x.fillRect(9,2,6,4);x.fillRect(2,8,5,6);x.fillRect(9,8,6,5);});
 })();
 
-/* paper doll: composited player sprites, 4 dirs x 2 frames */
+/* paper doll (4 dirs x 2 frames) */
 function buildDoll(app){
-  // app = {skin, hair, tunic, legs}
-  const frames = {}; // dir -> [c0, c1]
-  const DIRS = ['down','up','left','right'];
-  for(const dir of DIRS){
+  const frames = {};
+  for(const dir of ['down','up','left','right']){
     frames[dir]=[];
     for(let f=0; f<2; f++){
       const [c,x] = mkCanvas(16,20);
       const bob = f?1:0;
-      const step = f?2:-2;
-      // legs layer
       x.fillStyle = app.legs;
       if(dir==='left'||dir==='right'){
-        x.fillRect(6+ (f?1:-1),15,3,5); x.fillRect(8+(f?-1:1),15,3,5);
+        x.fillRect(6+(f?1:-1),15,3,5); x.fillRect(8+(f?-1:1),15,3,5);
       } else {
-        x.fillRect(5,15+(f?0:0),3,5-(f?1:0)); x.fillRect(9,15,3,5-(f?0:1));
+        x.fillRect(5,15,3,5-(f?1:0)); x.fillRect(9,15,3,5-(f?0:1));
       }
-      // body / tunic layer
-      x.fillStyle = app.tunic;
-      x.fillRect(4,8+bob,8,8);
-      x.fillStyle = PAL.belt;
-      x.fillRect(4,13+bob,8,1);
-      // arms layer
+      x.fillStyle = app.tunic; x.fillRect(4,8+bob,8,8);
+      x.fillStyle = PAL.belt;  x.fillRect(4,13+bob,8,1);
       x.fillStyle = app.tunic;
       if(dir==='left'){ x.fillRect(3,9+bob,2,5); }
       else if(dir==='right'){ x.fillRect(11,9+bob,2,5); }
@@ -150,16 +152,11 @@ function buildDoll(app){
       if(dir==='left'){ x.fillRect(3,13+bob,2,2); }
       else if(dir==='right'){ x.fillRect(11,13+bob,2,2); }
       else { x.fillRect(3,13+bob,2,2); x.fillRect(11,13+bob,2,2); }
-      // head layer
-      x.fillStyle = app.skin;
-      x.fillRect(5,2+bob,6,6);
-      // hair layer
-      x.fillStyle = app.hair;
-      x.fillRect(4,1+bob,8,3);
+      x.fillStyle = app.skin; x.fillRect(5,2+bob,6,6);
+      x.fillStyle = app.hair; x.fillRect(4,1+bob,8,3);
       if(dir==='up'){ x.fillRect(4,1+bob,8,5); }
       else if(dir==='left'){ x.fillRect(9,3+bob,3,3); }
       else if(dir==='right'){ x.fillRect(4,3+bob,3,3); }
-      // eyes (not for up)
       if(dir!=='up'){
         x.fillStyle='#20180f';
         if(dir==='down'){ x.fillRect(6,5+bob,1,1); x.fillRect(9,5+bob,1,1); }
@@ -171,88 +168,178 @@ function buildDoll(app){
   }
   return frames;
 }
-
-/* wolf sprites: 2 frames, right-facing (flip for left) */
 function buildWolf(){
   const out=[];
   for(let f=0; f<2; f++){
     const [c,x]=mkCanvas(18,12);
     x.fillStyle=PAL.wolfA;
-    x.fillRect(3,3,10,5);              // body
-    x.fillRect(12,1,5,4);              // head
+    x.fillRect(3,3,10,5); x.fillRect(12,1,5,4);
     x.fillStyle=PAL.wolfB;
-    x.fillRect(0,2,4,2);               // tail
-    x.fillRect(15,4,2,2);              // snout shade
-    // legs alternate
+    x.fillRect(0,2,4,2); x.fillRect(15,4,2,2);
     x.fillRect(4+(f?1:0),8,2,4); x.fillRect(10-(f?1:0),8,2,4);
-    x.fillStyle=PAL.wolfEye;
-    x.fillRect(14,2,1,1);              // eye glint
-    x.fillStyle=PAL.wolfB;
-    x.fillRect(13,0,2,1);              // ear
+    x.fillStyle=PAL.wolfEye; x.fillRect(14,2,1,1);
+    x.fillStyle=PAL.wolfB; x.fillRect(13,0,2,1);
     out.push(c);
   }
   return out;
 }
 const WOLF_SPR = buildWolf();
 
-/* ---------------- world / tilemap ---------------------------- */
-const MW=88, MH=64;
-const ground = new Uint8Array(MW*MH);   // 0 grass0 1 grass1 2 road 3 water 4 floor 5 sand
-const solid  = new Uint8Array(MW*MH);   // 1 = blocked
-const GID = {grass0:0, grass1:1, road:2, water:3, floor:4, sand:5};
-const GT  = ['grass0','grass1','road','water','floor','sand'];
+/* ---------------- world geometry (§11.5) ------------------------- */
+/*  interior 21..39 x 25..43 · wall ring 20/40, 24/44 · verge +3
+    moat +6 · bank +4 · bridges N/S/E/W · roads cross at 30/34    */
+const MW=112, MH=72;
+const ground = new Uint8Array(MW*MH);
+const solid  = new Uint8Array(MW*MH);
+const flags  = new Uint8Array(MW*MH);        // 1=bridge 2=verge 4=bank
+const GID = {grass0:0, grass1:1, road:2, water:3, floor:4, plank:5, bank:6, cobble:7};
+const GT  = ['grass0','grass1','road','water','floor','plank','bank','cobble'];
 const idx = (tx,ty)=>ty*MW+tx;
 const inMap = (tx,ty)=>tx>=0&&ty>=0&&tx<MW&&ty<MH;
+const inR = (tx,ty,x0,y0,x1,y1)=>tx>=x0&&tx<=x1&&ty>=y0&&ty<=y1;
 
-const town = { x0:10*16, y0:18*16, x1:44*16, y1:46*16 };   // safe bounds, px
-const inTown = (x,y)=> x>=town.x0 && x<=town.x1 && y>=town.y0 && y<=town.y1;
+const WALL={x0:20,y0:24,x1:40,y1:44};              // wall ring rect
+const VERGE={x0:17,y0:21,x1:43,y1:47};             // verge outer rect
+const MOAT={x0:11,y0:15,x1:49,y1:53};              // moat outer rect
+const BANK={x0:7, y0:11,x1:53,y1:57};              // bank outer rect
+const RX=30, RY=34;                                 // road cross (center col/row)
+const TOWN_CX=(RX)*16+8, TOWN_CY=(RY)*16+8;
 
-const buildings=[], trees=[], lamps=[];
+const inVergeT = (tx,ty)=> inR(tx,ty,VERGE.x0,VERGE.y0,VERGE.x1,VERGE.y1);
+const inMoatT  = (tx,ty)=> inR(tx,ty,MOAT.x0,MOAT.y0,MOAT.x1,MOAT.y1) && !inVergeT(tx,ty);
+const inBankT  = (tx,ty)=> inR(tx,ty,BANK.x0,BANK.y0,BANK.x1,BANK.y1) &&
+                           !inR(tx,ty,MOAT.x0,MOAT.y0,MOAT.x1,MOAT.y1);
+function inTown(px,py){          // safe: inside verge outer rect, or on a bridge
+  const tx=Math.floor(px/16), ty=Math.floor(py/16);
+  if(!inMap(tx,ty)) return false;
+  if(flags[idx(tx,ty)]&1) return true;
+  return inVergeT(tx,ty);
+}
+function onVerge(px,py){
+  const tx=Math.floor(px/16), ty=Math.floor(py/16);
+  return inMap(tx,ty) && (flags[idx(tx,ty)]&2)!==0;
+}
+
+const buildings=[], trees=[], lamps=[], props=[], wallTiles=[], glints=[];
 (function genWorld(){
   const wr = mulberry32(99);
-  // base grass
   for(let ty=0;ty<MH;ty++)for(let tx=0;tx<MW;tx++)
     ground[idx(tx,ty)] = wr()<0.5?GID.grass0:GID.grass1;
-  // roads: cross through town, extending to map edges
-  for(let tx=0;tx<MW;tx++)for(let dy=-1;dy<=1;dy++)
-    ground[idx(tx,32+dy)]=GID.road;
-  for(let ty=0;ty<MH;ty++)for(let dx=-1;dx<=1;dx++)
-    ground[idx(27+dx,ty)]=GID.road;
-  // pond east of town
-  const pcx=62, pcy=14, pr=5;
-  for(let ty=pcy-pr-1;ty<=pcy+pr+1;ty++)for(let tx=pcx-pr-1;tx<=pcx+pr+1;tx++){
-    if(!inMap(tx,ty))continue;
-    const d=Math.hypot(tx-pcx,ty-pcy);
-    if(d<=pr){ground[idx(tx,ty)]=GID.water;solid[idx(tx,ty)]=1;}
-    else if(d<=pr+0.9 && ground[idx(tx,ty)]!==GID.road) ground[idx(tx,ty)]=GID.sand;
+
+  /* bank ring: cleared ground so the horde is visible (§11.5.1) */
+  for(let ty=BANK.y0;ty<=BANK.y1;ty++)for(let tx=BANK.x0;tx<=BANK.x1;tx++){
+    if(inBankT(tx,ty)){ ground[idx(tx,ty)]=GID.bank; flags[idx(tx,ty)]|=4; }
   }
-  // buildings in town: {tx,ty,tw,th,door(tile x)}
-  function bld(tx,ty,tw,th){
-    buildings.push({tx,ty,tw,th,door:tx+Math.floor(tw/2)});
+  /* moat: 6 tiles of deep water, blocked (wading arrives in P4/P16) */
+  for(let ty=MOAT.y0;ty<=MOAT.y1;ty++)for(let tx=MOAT.x0;tx<=MOAT.x1;tx++){
+    if(inMoatT(tx,ty)){ ground[idx(tx,ty)]=GID.water; solid[idx(tx,ty)]=1; }
+  }
+  /* verge: walkable lamp-lit ring */
+  for(let ty=VERGE.y0;ty<=VERGE.y1;ty++)for(let tx=VERGE.x0;tx<=VERGE.x1;tx++){
+    if(inVergeT(tx,ty) && !inR(tx,ty,WALL.x0,WALL.y0,WALL.x1,WALL.y1))
+      flags[idx(tx,ty)]|=2;
+  }
+  /* wall ring with 3-wide gate openings at the road */
+  for(let tx=WALL.x0;tx<=WALL.x1;tx++)for(const ty of [WALL.y0,WALL.y1]){
+    if(Math.abs(tx-RX)<=1) continue;
+    solid[idx(tx,ty)]=1; wallTiles.push({tx,ty});
+  }
+  for(let ty=WALL.y0+1;ty<WALL.y1;ty++)for(const tx of [WALL.x0,WALL.x1]){
+    if(Math.abs(ty-RY)<=1) continue;
+    solid[idx(tx,ty)]=1; wallTiles.push({tx,ty});
+  }
+  /* roads: cross the interior and run out the four gates to map edges */
+  function road(tx,ty){ const i=idx(tx,ty);
+    if(ground[i]!==GID.water){ ground[i]=GID.road; } }
+  for(let ty=0;ty<MH;ty++)for(let d=-1;d<=1;d++) road(RX+d,ty);
+  for(let tx=0;tx<MW;tx++)for(let d=-1;d<=1;d++) road(tx,RY+d);
+  /* town square: cobbles around the cross */
+  for(let ty=RY-4;ty<=RY+4;ty++)for(let tx=RX-5;tx<=RX+5;tx++){
+    if(inR(tx,ty,WALL.x0+1,WALL.y0+1,WALL.x1-1,WALL.y1-1) &&
+       ground[idx(tx,ty)]!==GID.road) ground[idx(tx,ty)]=GID.cobble;
+  }
+  /* bridges: plank over the moat where roads cross it */
+  function bridge(tx,ty){ const i=idx(tx,ty);
+    ground[i]=GID.plank; solid[i]=0; flags[i]|=1; }
+  for(let d=-1;d<=1;d++){
+    for(let ty=MOAT.y0;ty<VERGE.y0;ty++) bridge(RX+d,ty);        // N
+    for(let ty=VERGE.y1+1;ty<=MOAT.y1;ty++) bridge(RX+d,ty);     // S
+    for(let tx=MOAT.x0;tx<VERGE.x0;tx++) bridge(tx,RY+d);        // W
+    for(let tx=VERGE.x1+1;tx<=MOAT.x1;tx++) bridge(tx,RY+d);     // E
+  }
+
+  /* buildings: {tx,ty,tw,th,door,roof,wall,chim,sign} */
+  function bld(tx,ty,tw,th,roof,wall,opts){
+    const b={tx,ty,tw,th,door:tx+Math.floor(tw/2),roof,wall,
+      chim:opts&&opts.chim, sign:opts&&opts.sign, smokeT:R(0,1)};
+    buildings.push(b);
     for(let y=ty;y<ty+th;y++)for(let x=tx;x<tx+tw;x++){
       solid[idx(x,y)]=1; ground[idx(x,y)]=GID.floor;
     }
+    return b;
   }
-  bld(14,22,6,4);   // NW
-  bld(31,21,7,5);   // NE — tavern
-  bld(14,36,5,4);   // SW
-  bld(32,37,6,4);   // SE
-  // town lamps
-  lamps.push({x:27*16+8,y:30*16},{x:27*16+8,y:35*16},
-             {x:24*16,y:32*16+8},{x:31*16,y:32*16+8});
-  // trees outside town, off roads/water
-  for(let i=0;i<220;i++){
+  bld(22,26,5,4,'thatch','timber',{chim:true});          // NW cottage
+  bld(33,26,6,5,'shingle','timber',{chim:true,sign:true});// NE — the tavern
+  bld(22,38,4,4,'slate','stone',{chim:true});            // SW stone house
+  bld(35,39,5,4,'thatch','timber',{});                   // SE cottage
+  bld(23,32,3,3,'slate','stone',{});                     // small shed W
+
+  /* props: well, stall, barrels, crates, fences, gardens, flowers */
+  function prop(type,tx,ty,solidTile){
+    props.push({type,x:tx*16+8,y:ty*16+16,tx,ty,seed:RI(0,99)});
+    if(solidTile) solid[idx(tx,ty)]=1;
+  }
+  prop('well', RX+3, RY-2, true);
+  prop('stall', RX-4, RY+2, true);
+  prop('barrel', 33, 32, true); prop('barrel', 34, 32, true);
+  prop('crate', 27, 41, true);  prop('crate', 38, 37, true);
+  prop('barrel', 22, 31, true);
+  /* garden with fence, SE interior */
+  for(let tx=30;tx<=33;tx++){ prop('fence',tx,42,false); }
+  for(let tx=30;tx<=33;tx++)for(let ty=43;ty<=43;ty++) prop('crop',tx,ty,false);
+  /* flowers along verge + square */
+  const fl=[[18,22],[26,22],[36,22],[42,26],[42,36],[18,32],[18,42],
+            [26,46],[36,46],[RX-5,RY-3],[RX+5,RY+3]];
+  for(const f of fl) prop('flower',f[0],f[1],false);
+
+  /* lamps: verge ring every ~8 tiles + square */
+  function lamp(tx,ty){ lamps.push({x:tx*16+8,y:ty*16+8}); }
+  for(let tx=18;tx<=42;tx+=8){ lamp(tx,22); lamp(tx,46); }
+  for(let ty=28;ty<=44;ty+=8){ lamp(18,ty); lamp(42,ty); }
+  lamp(RX-3,RY-2); lamp(RX+3,RY+2);
+
+  /* trees: outside the bank ring, off roads */
+  for(let i=0;i<300;i++){
     const tx=RI(1,MW-2), ty=RI(1,MH-2);
-    const px=tx*16+8, py=ty*16+8;
-    if(inTown(px,py))continue;
+    if(inR(tx,ty,BANK.x0-1,BANK.y0-1,BANK.x1+1,BANK.y1+1))continue;
     const gid=ground[idx(tx,ty)];
-    if(gid===GID.road||gid===GID.water||gid===GID.sand||solid[idx(tx,ty)])continue;
-    // keep road shoulders clear
-    if(Math.abs(ty-32)<3||Math.abs(tx-27)<3)continue;
+    if(gid===GID.road||gid===GID.water||solid[idx(tx,ty)])continue;
+    if(Math.abs(ty-RY)<3||Math.abs(tx-RX)<3)continue;
     solid[idx(tx,ty)]=1;
-    trees.push({x:px,y:ty*16+16,seed:RI(0,3)});
+    trees.push({x:tx*16+8,y:ty*16+16,seed:RI(0,3)});
   }
   trees.sort((a,b)=>a.y-b.y);
+
+  /* pond scenery, far east field */
+  const pcx=80, pcy=20, pr=4;
+  for(let ty=pcy-pr;ty<=pcy+pr;ty++)for(let tx=pcx-pr;tx<=pcx+pr;tx++){
+    if(!inMap(tx,ty))continue;
+    if(Math.hypot(tx-pcx,ty-pcy)<=pr){
+      ground[idx(tx,ty)]=GID.water; solid[idx(tx,ty)]=1;
+    }
+  }
+
+  /* eye glints in the treeline beyond the bank (§11.5.3) */
+  for(let i=0;i<B.GLINT_COUNT;i++){
+    const side=RI(0,3);
+    let tx,ty;
+    if(side===0){tx=RI(BANK.x0-9,BANK.x1+9);ty=RI(BANK.y0-9,BANK.y0-3);}
+    else if(side===1){tx=RI(BANK.x0-9,BANK.x1+9);ty=RI(BANK.y1+3,BANK.y1+9);}
+    else if(side===2){tx=RI(BANK.x0-9,BANK.x0-3);ty=RI(BANK.y0,BANK.y1);}
+    else {tx=RI(BANK.x1+3,BANK.x1+9);ty=RI(BANK.y0,BANK.y1);}
+    if(!inMap(tx,ty))continue;
+    glints.push({x:tx*16+RI(2,13),y:ty*16+RI(2,13),ph:R(0,6.28),sp:R(0.4,1.4)});
+  }
 })();
 
 function solidAt(px,py){
@@ -260,7 +347,6 @@ function solidAt(px,py){
   if(!inMap(tx,ty))return 1;
   return solid[idx(tx,ty)];
 }
-/* AABB move with per-axis slide; hitbox is feet: 10x6 */
 function moveEntity(e,dx,dy){
   const hw=5,hh=3;
   if(dx!==0){
@@ -275,22 +361,18 @@ function moveEntity(e,dx,dy){
   e.y=Math.min(Math.max(e.y,6),MH*16-6);
 }
 
-/* ---------------- game state --------------------------------- */
+/* ---------------- state ----------------------------------------- */
 const player = {
-  x:27*16+8, y:33*16+8, dir:'down', frame:0, animT:0,
+  x:RX*16+8, y:(RY+3)*16+8, dir:'down', frame:0, animT:0,
   hp:100, hpMax:100, aether:0, aetherMax:B.AETHER_MAX,
   coins:0, iframes:0, dodgeT:0, dodgeVX:0, dodgeVY:0,
   fireT:0, lastHitT:-99, flashT:0,
   moving:false, moveSamples:[],
   spr: buildDoll({skin:PAL.skin, hair:PAL.hair, tunic:PAL.tunic, legs:PAL.legs})
 };
-let gameT = 8*60;            // in-game minutes; day starts 08:00
-let dayN = 1;
-let clockAcc = 0;
-let wolves = [], projectiles = [], coins = [], particles = [], novas = [];
-let hitstop = 0;
-let flowT = 0;               // seconds of unbroken flow
-let flowActive = false;
+let gameT = 8*60, dayN = 1, clockAcc = 0;
+let wolves=[], projectiles=[], coins=[], particles=[], novas=[], spectators=[];
+let hitstop=0, flowT=0, flowActive=false;
 
 function spawnWolfPack(cx,cy,n){
   for(let i=0;i<n;i++){
@@ -299,31 +381,43 @@ function spawnWolfPack(cx,cy,n){
       x:cx+Math.cos(a)*d, y:cy+Math.sin(a)*d,
       hp:30, hpMax:30, face:1, frame:0, animT:0, flashT:0,
       state:'idle', stT:R(0,2), circA:R(0,Math.PI*2), circDir:rng()<0.5?1:-1,
-      lungeT:0, lvx:0, lvy:0, chill:0, hitT:0, deadT:0
+      lungeT:0, lvx:0, lvy:0, chill:0, deadT:0
     });
   }
 }
-spawnWolfPack(64*16, 34*16, 4);       // east field — the first fight, open ground
-spawnWolfPack(70*16, 22*16, 3);
+spawnWolfPack(66*16, 36*16, 4);
+spawnWolfPack(76*16, 26*16, 3);
 let respawnT = 0;
 
-/* ---------------- hints (subset of §4) ----------------------- */
+/* day/night: 0..1 ambient light */
+function hourNow(){ return gameT/60; }
+function lightLevel(){
+  const h=hourNow();
+  if(h>=7&&h<17) return 1.0;
+  if(h>=17&&h<19.5) return 1.0-(h-17)/2.5*0.65;    // dusk
+  if(h>=19.5||h<3) return 0.35;                     // night
+  if(h>=3&&h<5) return 0.30;                        // deep
+  return 0.30+(h-5)/2*0.70;                         // dawn
+}
+const isNight = ()=>{ const h=hourNow(); return h>=19.5||h<5; };
+
+/* ---------------- hints (§4, trimmed for 240px) ------------------ */
 const hints = [
-  {id:1, text:'Drag anywhere on the left to move.',
+  {id:1, text:'Drag on the left side to move.',
     trig:()=>true, sat:s=>s.movedPx>60},
-  {id:2, text:"Your weapon fires on its own. Just don't get hit.",
+  {id:2, text:"Weapon fires on its own. Don't get hit.",
     trig:()=>nearestWolfDist()<8*16, sat:s=>s.t>3},
-  {id:3, text:'\u25cd Aether. It builds when you\u2019re near danger.',
+  {id:3, text:'\u25cd Aether builds near danger.',
     trig:()=>player.aether>=30, sat:s=>s.t>4},
   {id:4, text:'[A] is lit. Cast it.',
-    trig:()=>player.aether>=B.NOVA.cost, sat:s=>s.cast},
-  {id:5, text:'Keep moving \u2014 standing still starves your Aether.',
-    trig:()=>combatActive()&&stillFor>3, sat:s=>player.moving}
+    trig:()=>player.aether>=B.NOVA.cost&&!inTown(player.x,player.y), sat:s=>s.cast},
+  {id:5, text:'Standing still starves Aether.',
+    trig:()=>combatActive()&&stillFor>3, sat:s=>player.moving},
+  {id:33, text:'That\u2019s what\u2019s out there. The water is why you\u2019re safe.',
+    trig:()=>isNight()&&onVerge(player.x,player.y)&&spectators.length>4, sat:s=>s.t>6}
 ];
-const hintFlags = {};       // id -> done
-let activeHint = null;      // {h, t, movedPx, cast, escal}
-let stillFor = 0;
-
+const hintFlags = {};
+let activeHint = null, stillFor = 0;
 function combatActive(){ return nearestWolfDist()<10*16 && !inTown(player.x,player.y); }
 function nearestWolfDist(){
   let d=1e9;
@@ -336,7 +430,7 @@ function updateHints(dt){
     const s=activeHint; s.t+=dt;
     if(s.h.sat(s)){ hintFlags[s.h.id]=true; s.leaving=0.5; }
     if(s.leaving!==undefined){ s.leaving-=dt; if(s.leaving<=0) activeHint=null; return; }
-    if(s.t>B.HINT_GIVEUP_S){ activeHint=null; }   // requeue naturally via trig
+    if(s.t>B.HINT_GIVEUP_S){ activeHint=null; }
     return;
   }
   for(const h of hints){
@@ -345,23 +439,23 @@ function updateHints(dt){
   }
 }
 
-/* ---------------- input: touch stick + buttons + keys -------- */
+/* ---------------- input ------------------------------------------ */
 const stick = {active:false, id:-1, ox:0, oy:0, dx:0, dy:0};
 const keys = {};
 window.addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;
   if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase()))e.preventDefault();});
 window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
 
-const buttons = {}; // recomputed per layout: name -> {x,y,r,label}
+const buttons = {};
 function layoutButtons(){
   if(PORTRAIT){
-    buttons.A={x:LW-36, y:LH-92, r:18, label:'A'};
-    buttons.C={x:LW-78, y:LH-64, r:14, label:'C'};
-    buttons.D={x:LW-36, y:LH-140, r:14, label:'D'};
+    buttons.A={x:LW-26, y:LH-62, r:15, label:'A'};
+    buttons.C={x:LW-60, y:LH-38, r:12, label:'C'};
+    buttons.D={x:LW-26, y:LH-104, r:11, label:'D'};
   } else {
-    buttons.A={x:LW-34, y:LH-62, r:18, label:'A'};
-    buttons.C={x:LW-72, y:LH-36, r:14, label:'C'};
-    buttons.D={x:LW-34, y:LH-108, r:14, label:'D'};
+    buttons.A={x:LW-27, y:LH-49, r:15, label:'A'};
+    buttons.C={x:LW-61, y:LH-25, r:12, label:'C'};
+    buttons.D={x:LW-27, y:LH-90, r:11, label:'D'};
   }
 }
 layoutButtons();
@@ -371,17 +465,14 @@ function toLogical(e){
   const dpr = cv.width/window.innerWidth;
   return {x:(e.clientX*dpr-OX)/SCALE, y:(e.clientY*dpr-OY)/SCALE};
 }
-const pointers = {};
 cv.addEventListener('pointerdown',e=>{
   e.preventDefault(); cv.setPointerCapture(e.pointerId);
-  const p=toLogical(e); pointers[e.pointerId]=p;
-  // buttons first
+  const p=toLogical(e);
   for(const k in buttons){const b=buttons[k];
-    if(Math.hypot(p.x-b.x,p.y-b.y)<=b.r+6){ pressButton(k); return; }}
+    if(Math.hypot(p.x-b.x,p.y-b.y)<=b.r+5){ pressButton(k); return; }}
   if(p.x < LW*0.55 && !stick.active){
     stick.active=true; stick.id=e.pointerId;
     stick.ox=p.x; stick.oy=p.y; stick.dx=0; stick.dy=0;
-    if(activeHint&&activeHint.h.id===1)activeHint.stickSeen=true;
   }
 });
 cv.addEventListener('pointermove',e=>{
@@ -389,7 +480,7 @@ cv.addEventListener('pointermove',e=>{
   if(stick.active && e.pointerId===stick.id){
     const p=toLogical(e);
     let dx=p.x-stick.ox, dy=p.y-stick.oy;
-    const m=Math.hypot(dx,dy), MAX=26;
+    const m=Math.hypot(dx,dy), MAX=22;
     if(m>MAX){dx=dx/m*MAX;dy=dy/m*MAX;}
     stick.dx=dx; stick.dy=dy;
   }
@@ -398,18 +489,16 @@ function endPointer(e){
   if(stick.active && e.pointerId===stick.id){
     stick.active=false; stick.dx=0; stick.dy=0;
   }
-  delete pointers[e.pointerId];
 }
 cv.addEventListener('pointerup',endPointer);
 cv.addEventListener('pointercancel',endPointer);
-
 function pressButton(k){
   if(k==='A') tryCast();
   else if(k==='C') tryDodge();
-  else if(k==='D') beep(160,0.05,0.02); // ult stub (P6)
+  else if(k==='D') beep(160,0.05,0.02);
 }
 
-/* ---------------- tiny webaudio (P12 preview, minimal) ------- */
+/* ---------------- audio (minimal) --------------------------------- */
 let AC=null;
 function beep(freq,dur,vol,type){
   try{
@@ -423,7 +512,8 @@ function beep(freq,dur,vol,type){
   }catch(_){}
 }
 
-/* ---------------- actions ------------------------------------ */
+/* ---------------- actions ------------------------------------------ */
+let shakeAether=0;
 function tryDodge(){
   if(player.dodgeT>0) return;
   if(player.aether < B.DODGE_COST){ shakeAether=0.4; return; }
@@ -438,7 +528,7 @@ function tryDodge(){
   beep(520,0.08,0.04,'square');
 }
 function tryCast(){
-  if(inTown(player.x,player.y)) return;                    // no magic in town
+  if(inTown(player.x,player.y)) return;
   if(player.aether < B.NOVA.cost){ shakeAether=0.4; return; }
   player.aether -= B.NOVA.cost;
   const r = B.NOVA.radiusT*16;
@@ -457,11 +547,10 @@ function tryCast(){
   }
   if(activeHint&&activeHint.h.id===4)activeHint.cast=true;
   beep(880,0.18,0.06,'sine'); beep(1320,0.25,0.03,'sine');
-  hitstop = Math.max(hitstop, 2);
+  hitstop = Math.max(hitstop, 2/60);
 }
-
 function hurtWolf(w,dmg,fx,fy,kb){
-  w.hp -= dmg; w.flashT = 0.1; w.hitT = 0.35;
+  w.hp -= dmg; w.flashT = 0.1;
   const a=Math.atan2(w.y-fy,w.x-fx);
   w.lvx = Math.cos(a)*60*(kb||1); w.lvy = Math.sin(a)*60*(kb||1);
   hitstop = Math.max(hitstop,3/60);
@@ -480,35 +569,31 @@ function hurtWolf(w,dmg,fx,fy,kb){
     respawnT = 8;
   } else beep(300,0.05,0.04,'square');
 }
-
 function hurtPlayer(dmg){
   if(player.iframes>0 || inTown(player.x,player.y)) return;
   player.hp -= dmg;
   player.aether *= (1-B.AETHER_HIT_LOSS);
-  player.lastHitT = 0;                  // breaks flow
+  player.lastHitT = 0;
   player.flashT = 0.15;
   player.iframes = 0.5;
   beep(140,0.15,0.07,'sawtooth');
   if(player.hp<=0){
-    // P1 death: wake at town center (inn comes in P8)
     player.hp = player.hpMax; player.aether=0;
     player.coins = Math.floor(player.coins*0.75);
-    player.x=27*16+8; player.y=33*16+8;
+    player.x=RX*16+8; player.y=(RY+3)*16+8;
   }
 }
 
-/* ---------------- update ------------------------------------- */
-let camX=0, camY=0, shakeAether=0;
+/* ---------------- update -------------------------------------------- */
+let camX=0, camY=0;
 function update(dt){
   if(hitstop>0){ hitstop-=dt; return; }
   clockAcc += dt*1000;
   gameT = 8*60 + (clockAcc/B.DAY_MS)*24*60;
   while(gameT>=24*60){gameT-=24*60; dayN++; clockAcc-=B.DAY_MS;}
 
-  const inT = inTown(player.x,player.y);
-
-  /* --- player movement --- */
-  let vx = stick.dx/26, vy = stick.dy/26;
+  /* --- player --- */
+  let vx = stick.dx/22, vy = stick.dy/22;
   if(keys['a']||keys['arrowleft'])vx=-1; if(keys['d']||keys['arrowright'])vx=1;
   if(keys['w']||keys['arrowup'])vy=-1;  if(keys['s']||keys['arrowdown'])vy=1;
   if(keys[' ']){keys[' ']=false; tryDodge();}
@@ -519,11 +604,9 @@ function update(dt){
   if(player.dodgeT>0){
     player.dodgeT-=dt;
     moveEntity(player, player.dodgeVX*dt, player.dodgeVY*dt);
-    // afterimage
     particles.push({x:player.x,y:player.y-8,vx:0,vy:0,t:0.15,col:'#ffffff',sz:2});
   } else if(player.moving){
-    const spd = B.PLAYER_SPEED;
-    const dx=vx*spd*dt, dy=vy*spd*dt;
+    const dx=vx*B.PLAYER_SPEED*dt, dy=vy*B.PLAYER_SPEED*dt;
     moveEntity(player,dx,dy);
     if(Math.abs(vx)>Math.abs(vy)) player.dir = vx>0?'right':'left';
     else player.dir = vy>0?'down':'up';
@@ -536,7 +619,6 @@ function update(dt){
   player.flashT=Math.max(0,player.flashT-dt);
   player.lastHitT+=dt;
 
-  /* movement window samples for Flow */
   player.moveSamples.push({t:performance.now()/1000,x:player.x,y:player.y});
   while(player.moveSamples.length>2 &&
         player.moveSamples[0].t < performance.now()/1000 - B.FLOW_MOVE_WINDOW)
@@ -544,19 +626,19 @@ function update(dt){
   const ms0=player.moveSamples[0], msN=player.moveSamples[player.moveSamples.length-1];
   const windowDist = Math.hypot(msN.x-ms0.x, msN.y-ms0.y);
 
-  /* --- Flow --- */
+  /* --- flow --- */
   const near = nearestWolfDist();
-  const enemyNear = near < 6*16;
-  flowActive = !inT && player.lastHitT>=B.FLOW_DELAY && enemyNear
+  const inT = inTown(player.x,player.y);
+  flowActive = !inT && player.lastHitT>=B.FLOW_DELAY && near<6*16
                && windowDist>=B.FLOW_MOVE_PX;
   if(flowActive) flowT+=dt; else flowT=0;
-  let flowMult=0, flowTier=0;
+  let flowMult=0;
   for(let i=0;i<B.FLOW_TIERS.length;i++)
-    if(flowT>=B.FLOW_TIERS[i][0]){flowMult=B.FLOW_TIERS[i][1];flowTier=i+1;}
+    if(flowT>=B.FLOW_TIERS[i][0])flowMult=B.FLOW_TIERS[i][1];
 
-  /* --- Aether (§6.1) --- */
+  /* --- aether --- */
   if(inT){
-    player.aether = Math.max(0, player.aether - 20*dt);   // decays in town
+    player.aether = Math.max(0, player.aether - 20*dt);
   } else {
     let enemiesIn6=0;
     for(const w of wolves)if(w.hp>0 &&
@@ -569,7 +651,7 @@ function update(dt){
     player.aether = Math.min(player.aetherMax, player.aether + gain*dt);
   }
 
-  /* --- auto-fire (§5.2) --- */
+  /* --- auto-fire --- */
   player.fireT -= dt;
   if(!inT && player.fireT<=0){
     let best=null, bd=B.SLING.range;
@@ -586,8 +668,6 @@ function update(dt){
       beep(700+R(-60,60),0.03,0.015,'triangle');
     }
   }
-
-  /* --- projectiles --- */
   for(let i=projectiles.length-1;i>=0;i--){
     const p=projectiles[i];
     p.x+=p.vx*dt; p.y+=p.vy*dt; p.t-=dt;
@@ -602,22 +682,21 @@ function update(dt){
   }
 
   /* --- wolves --- */
+  function stepWolf(w,dx,dy){ moveEntity(w,dx,dy); if(Math.abs(dx)>0.01)w.face=dx>0?1:-1; }
   for(let i=wolves.length-1;i>=0;i--){
     const w=wolves[i];
     if(w.hp<=0){ w.deadT+=dt; if(w.deadT>1.2)wolves.splice(i,1); continue; }
     w.flashT=Math.max(0,w.flashT-dt);
     w.chill=Math.max(0,w.chill-dt);
     w.animT+=dt; if(w.animT>0.15){w.animT=0;w.frame=1-w.frame;}
-    // knockback decay
     if(Math.abs(w.lvx)>1||Math.abs(w.lvy)>1){
       moveEntity(w,w.lvx*dt,w.lvy*dt);
       w.lvx*=0.85; w.lvy*=0.85;
     }
     const dx=player.x-w.x, dy=player.y-w.y, d=Math.hypot(dx,dy)||1;
     const slow = w.chill>0?B.NOVA.chillSlow:1;
-    const playerSafe = inTown(player.x,player.y);
+    const playerSafe = inT;
     if(playerSafe || d>150){
-      // idle wander
       w.stT-=dt;
       if(w.stT<=0){w.stT=R(1,3);w.wa=R(0,Math.PI*2);w.wm=rng()<0.6;}
       if(w.wm){ const s=18*slow;
@@ -629,11 +708,9 @@ function update(dt){
       if(d<12){ hurtPlayer(6); w.state='circle'; w.cd=R(2,3.5); }
       if(w.lungeT<=0){ w.state='circle'; w.cd=R(2,3.5); }
     } else {
-      // circle at ~40px, drift in, occasional lunge
       w.state='circle';
       w.circA = Math.atan2(w.y-player.y, w.x-player.x)
               + w.circDir*0.9*dt*slow;
-      const rad = Math.max(26, d-14*dt*20);
       const tx = player.x+Math.cos(w.circA)*Math.min(d,44);
       const ty = player.y+Math.sin(w.circA)*Math.min(d,44);
       const ma=Math.atan2(ty-w.y,tx-w.x), s=46*slow;
@@ -644,24 +721,47 @@ function update(dt){
         const la=Math.atan2(dy,dx);
         w.lvx2=Math.cos(la)*150; w.lvy2=Math.sin(la)*150;
       }
-      if(d<10) hurtPlayer(B.CONTACT_DPS*dt);   // contact is punishment
+      if(d<10) hurtPlayer(B.CONTACT_DPS*dt);
     }
-    w.face = (player.x>w.x && !playerSafe)?1:(w.wm?Math.sign(Math.cos(w.wa))||1:w.face);
-    // never enter town
+    /* never enter town/bridges */
     if(inTown(w.x,w.y)){
-      const a=Math.atan2(w.y-(town.y0+town.y1)/2, w.x-(town.x0+town.x1)/2);
-      w.x+=Math.cos(a)*40*dt; w.y+=Math.sin(a)*40*dt;
+      const a=Math.atan2(w.y-TOWN_CY, w.x-TOWN_CX);
+      w.x+=Math.cos(a)*50*dt; w.y+=Math.sin(a)*50*dt;
     }
   }
-  function stepWolf(w,dx,dy){ moveEntity(w,dx,dy); if(Math.abs(dx)>0.01)w.face=dx>0?1:-1; }
-
-  // respawn packs to keep field alive
   if(wolves.filter(w=>w.hp>0).length<3){
     respawnT-=dt;
-    if(respawnT<=0){ spawnWolfPack(R(58,74)*16, R(26,42)*16, RI(3,5)); respawnT=8; }
+    if(respawnT<=0){ spawnWolfPack(R(60,92)*16, R(14,60)*16, RI(3,5)); respawnT=8; }
   }
 
-  /* --- coins --- */
+  /* --- spectators: the moat horde, night only (§11.5.3-lite) --- */
+  if(isNight()){
+    if(spectators.length<B.SPECTATOR_CAP && rng()<dt*1.4){
+      for(let tries=0;tries<20;tries++){
+        const tx=RI(BANK.x0,BANK.x1), ty=RI(BANK.y0,BANK.y1);
+        if(!inBankT(tx,ty))continue;
+        spectators.push({x:tx*16+8,y:ty*16+8,face:1,frame:0,animT:0,
+          stT:R(0,2),wa:R(0,Math.PI*2),wm:false});
+        break;
+      }
+    }
+  } else if(spectators.length && rng()<dt*3) spectators.pop();
+  for(const s of spectators){
+    s.animT+=dt; if(s.animT>0.3){s.animT=0;s.frame=1-s.frame;}
+    s.stT-=dt;
+    if(s.stT<=0){ s.stT=R(1.5,4); s.wm=rng()<0.55; s.wa=R(0,Math.PI*2); }
+    if(s.wm){
+      const nx=s.x+Math.cos(s.wa)*12*dt, ny=s.y+Math.sin(s.wa)*12*dt;
+      const tx=Math.floor(nx/16), ty=Math.floor(ny/16);
+      if(inMap(tx,ty)&&inBankT(tx,ty)&&!(flags[idx(tx,ty)]&1)&&
+         ground[idx(tx,ty)]!==GID.road){ s.x=nx; s.y=ny; s.face=Math.cos(s.wa)>0?1:-1; }
+      else s.wa+=Math.PI;
+    } else {
+      s.face = TOWN_CX>s.x?1:-1;      // face the town while idle
+    }
+  }
+
+  /* --- coins / novas / particles --- */
   for(let i=coins.length-1;i>=0;i--){
     const c=coins[i]; c.t+=dt;
     c.x+=c.vx*dt; c.y+=c.vy*dt; c.vx*=0.9; c.vy*=0.9;
@@ -674,45 +774,53 @@ function update(dt){
     if(d<7){ coins.splice(i,1); player.coins++;
       beep(1180,0.05,0.03); beep(1560,0.07,0.02); }
   }
-
-  /* --- novas & particles --- */
   for(let i=novas.length-1;i>=0;i--){
     const n=novas[i]; n.t+=dt; n.r=n.rMax*Math.min(1,n.t/0.25);
     if(n.t>0.45)novas.splice(i,1);
   }
   for(let i=particles.length-1;i>=0;i--){
     const p=particles[i]; p.t-=dt;
-    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vx*=0.92; p.vy*=0.92;
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vx*=0.96; p.vy*=0.96;
     if(p.t<=0)particles.splice(i,1);
+  }
+
+  /* --- chimney smoke --- */
+  for(const b of buildings){
+    if(!b.chim)continue;
+    b.smokeT-=dt;
+    if(b.smokeT<=0){
+      b.smokeT=R(0.4,0.8);
+      const sx=(b.tx+b.tw)*16-12, sy=b.ty*16-14;
+      particles.push({x:sx+R(-1,1),y:sy,vx:R(2,6),vy:R(-11,-7),
+        t:R(1.4,2.4),col:PAL.smoke,sz:2});
+    }
   }
 
   shakeAether=Math.max(0,shakeAether-dt);
   updateHints(dt);
 
-  /* --- camera: follow, whole-pixel round (§13.2) --- */
-  const tX = player.x - LW/2, tY = player.y - LH/2 - 8;
+  const tX = player.x - LW/2, tY = player.y - LH/2 - 6;
   camX += (tX-camX)*Math.min(1,dt*6);
   camY += (tY-camY)*Math.min(1,dt*6);
   camX = Math.min(Math.max(camX,0), MW*16-LW);
   camY = Math.min(Math.max(camY,0), MH*16-LH);
 }
 
-/* ---------------- render ------------------------------------- */
+/* ---------------- render --------------------------------------------- */
 let waterPhase=0;
 function render(dt){
   waterPhase+=dt;
   const cx = Math.round(camX), cy = Math.round(camY);
-  g.fillStyle=PAL.night; g.fillRect(0,0,LW,LH);
+  g.fillStyle='#0a0c10'; g.fillRect(0,0,LW,LH);
 
-  /* 1. ground tiles */
-  const tx0=Math.floor(cx/16), ty0=Math.floor(cy/16);
+  const tx0=Math.max(0,Math.floor(cx/16)), ty0=Math.max(0,Math.floor(cy/16));
   const tx1=Math.min(MW-1,tx0+Math.ceil(LW/16)+1), ty1=Math.min(MH-1,ty0+Math.ceil(LH/16)+1);
-  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
-    const gid=ground[idx(tx,ty)];
-    g.drawImage(T[GT[gid]], tx*16-cx, ty*16-cy);
-  }
 
-  /* 3. water caustics (two scrolling lighten bands) */
+  /* ground */
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++)
+    g.drawImage(T[GT[ground[idx(tx,ty)]]], tx*16-cx, ty*16-cy);
+
+  /* water caustics */
   g.save(); g.globalCompositeOperation='lighter'; g.globalAlpha=0.12;
   g.fillStyle=PAL.waterLit;
   for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
@@ -725,30 +833,40 @@ function render(dt){
   }
   g.restore();
 
-  /* town bounds hint: faint dashed edge (dev aid, subtle) */
-  g.save(); g.globalAlpha=0.10; g.strokeStyle='#ffffff';
-  g.setLineDash([3,5]);
-  g.strokeRect(town.x0-cx, town.y0-cy, town.x1-town.x0, town.y1-town.y0);
-  g.setLineDash([]); g.restore();
+  /* verge stone rail: light lip on verge tiles that touch the moat */
+  g.fillStyle=PAL.stoneL;
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+    if(!(flags[idx(tx,ty)]&2))continue;
+    const px=tx*16-cx, py=ty*16-cy;
+    if(inMap(tx,ty-1)&&ground[idx(tx,ty-1)]===GID.water)g.fillRect(px,py,16,2);
+    if(inMap(tx,ty+1)&&ground[idx(tx,ty+1)]===GID.water)g.fillRect(px,py+14,16,2);
+    if(inMap(tx-1,ty)&&ground[idx(tx-1,ty)]===GID.water)g.fillRect(px,py,2,16);
+    if(inMap(tx+1,ty)&&ground[idx(tx+1,ty)]===GID.water)g.fillRect(px+2-2,py,2,16);
+  }
 
-  /* 4. blob shadows (directional shadows land in P4) */
-  g.save(); g.globalAlpha=0.28; g.fillStyle='#000';
+  /* shadows (blob; directional lands in P4) */
+  g.save(); g.globalAlpha=0.28*lightLevel(); g.fillStyle='#000';
   function blob(x,y,w){ g.beginPath();
     g.ellipse(Math.round(x-cx),Math.round(y-cy),w,Math.max(2,w*0.45),0,0,Math.PI*2);
     g.fill(); }
   blob(player.x,player.y+1,6);
   for(const w of wolves)if(w.hp>0)blob(w.x,w.y+1,7);
+  for(const s of spectators)blob(s.x,s.y+1,7);
   for(const t of trees)blob(t.x,t.y-1,7);
   g.restore();
 
-  /* 5. y-sorted entities & props */
+  /* y-sorted entities & props */
   const draws=[];
-  // buildings (drawn as wall+roof blocks; sort by base y)
-  for(const b of buildings){
-    draws.push({y:(b.ty+b.th)*16, fn:()=>drawBuilding(b,cx,cy)});
+  for(const wt of wallTiles){
+    if(wt.tx<tx0-1||wt.tx>tx1+1||wt.ty<ty0-1||wt.ty>ty1+2)continue;
+    draws.push({y:(wt.ty+1)*16, fn:()=>drawWallTile(wt,cx,cy)});
   }
+  for(const b of buildings)
+    draws.push({y:(b.ty+b.th)*16, fn:()=>drawBuilding(b,cx,cy)});
+  for(const p of props) draws.push({y:p.y, fn:()=>drawProp(p,cx,cy)});
   for(const t of trees) draws.push({y:t.y, fn:()=>drawTree(t,cx,cy)});
   for(const w of wolves) draws.push({y:w.y, fn:()=>drawWolf(w,cx,cy)});
+  for(const s of spectators) draws.push({y:s.y, fn:()=>drawSpectator(s,cx,cy)});
   draws.push({y:player.y, fn:()=>drawPlayer(cx,cy)});
   draws.sort((a,b)=>a.y-b.y);
   for(const d of draws)d.fn();
@@ -772,49 +890,207 @@ function render(dt){
     g.fillRect(Math.round(c.x-cx)-1,Math.round(c.y-cy)-2,2,3);
   }
   for(const p of particles){
-    g.globalAlpha=Math.min(1,p.t*3);
+    g.globalAlpha=Math.min(1,p.t*2);
     g.fillStyle=p.col;
     g.fillRect(Math.round(p.x-cx),Math.round(p.y-cy),p.sz||1,p.sz||1);
     g.globalAlpha=1;
   }
 
-  /* town lamps: warm glow discs (full lighting pass lands in P4) */
+  /* day/night ambient tint */
+  const L = lightLevel();
+  if(L<0.99){
+    g.fillStyle='rgba(12,18,46,'+((1-L)*0.62).toFixed(3)+')';
+    g.fillRect(0,0,LW,LH);
+  }
+
+  /* night lights: lamps, windows, glints — punched over the dark */
   g.save(); g.globalCompositeOperation='lighter';
+  const lampOn = L<0.85;
   for(const l of lamps){
     const lx=l.x-cx, ly=l.y-cy;
-    const grd=g.createRadialGradient(lx,ly,2,lx,ly,26);
-    grd.addColorStop(0,'rgba(255,214,140,0.20)');
-    grd.addColorStop(1,'rgba(255,214,140,0)');
-    g.fillStyle=grd; g.fillRect(lx-26,ly-26,52,52);
-    g.fillStyle='#3a2f1e'; g.fillRect(lx-1,ly-8,2,9);
-    g.fillStyle=PAL.window; g.fillRect(lx-2,ly-11,4,4);
+    if(lx<-30||lx>LW+30||ly<-30||ly>LH+30)continue;
+    if(lampOn){
+      const flick = 1+Math.sin(performance.now()/250+l.x)*0.06;
+      const grd=g.createRadialGradient(lx,ly-8,2,lx,ly-8,24*flick);
+      grd.addColorStop(0,'rgba(255,214,140,0.30)');
+      grd.addColorStop(1,'rgba(255,214,140,0)');
+      g.fillStyle=grd; g.fillRect(lx-26,ly-34,52,52);
+    }
+    g.globalCompositeOperation='source-over';
+    g.fillStyle='#3a2f1e'; g.fillRect(lx-1,ly-9,2,10);
+    g.fillStyle=lampOn?PAL.win:'#6a5a3a'; g.fillRect(lx-2,ly-12,4,4);
+    g.globalCompositeOperation='lighter';
+  }
+  if(isNight()){
+    /* treeline eye glints — the horde beyond the horde */
+    for(const gl of glints){
+      const gx=gl.x-cx, gy=gl.y-cy;
+      if(gx<-4||gx>LW+4||gy<-4||gy>LH+4)continue;
+      const blink=(Math.sin(performance.now()/1000*gl.sp+gl.ph)+1)/2;
+      if(blink<0.35)continue;
+      g.globalAlpha=blink*0.9;
+      g.fillStyle=PAL.wolfEye;
+      g.fillRect(Math.round(gx),Math.round(gy),1,1);
+      g.fillRect(Math.round(gx)+2,Math.round(gy),1,1);
+    }
+    g.globalAlpha=1;
   }
   g.restore();
 
   drawHUD();
   drawTouch();
 
-  /* blit logical -> screen, integer scale, letterboxed */
   sc.fillStyle='#000'; sc.fillRect(0,0,cv.width,cv.height);
   sc.drawImage(logical,0,0,LW,LH,OX,OY,LW*SCALE,LH*SCALE);
 }
 
+/* ---------------- draw: wall, buildings, props ------------------------ */
+function drawWallTile(wt,cx,cy){
+  const x=wt.tx*16-cx, y=wt.ty*16-cy;
+  g.fillStyle=PAL.stoneD; g.fillRect(x,y+2,16,14);          // base
+  g.fillStyle=PAL.stone;  g.fillRect(x,y-8,16,10);          // face
+  g.fillStyle=PAL.stoneD;
+  g.fillRect(x,y-3,16,1); g.fillRect(x+5,y-8,1,5); g.fillRect(x+11,y-3,1,5);
+  g.fillStyle=PAL.stoneL; g.fillRect(x,y-10,16,2);          // cap
+  if((wt.tx+wt.ty)%2===0){                                   // merlons
+    g.fillRect(x+2,y-13,4,3); g.fillRect(x+10,y-13,4,3);
+  }
+}
+
 function drawBuilding(b,cx,cy){
   const x=b.tx*16-cx, y=b.ty*16-cy, w=b.tw*16, h=b.th*16;
-  // walls (lower half)
-  for(let i=0;i<b.tw;i++)
-    g.drawImage(T.wall, x+i*16, y+h-16);
-  // roof
-  g.fillStyle=PAL.roofA; g.fillRect(x,y-8,w,h-12);
-  g.fillStyle=PAL.roofB;
-  for(let ry=y-8;ry<y+h-12-8;ry+=6) g.fillRect(x,ry+3,w,2);
-  g.fillStyle=PAL.roofRidge; g.fillRect(x,y-8,w,2);
-  g.fillRect(x,y+h-12-9,w,2);
-  // door + windows
+  const wallH=15, wy=y+h-wallH;
+  const lit = lightLevel()<0.85;
+
+  /* walls */
+  if(b.wall==='timber'){
+    g.fillStyle=PAL.plaster; g.fillRect(x,wy,w,wallH);
+    g.fillStyle=PAL.beam;
+    g.fillRect(x,wy,w,2); g.fillRect(x,y+h-2,w,2);
+    for(let bx=0;bx<=w-2;bx+=Math.max(10,Math.floor(w/b.tw)))
+      g.fillRect(x+bx,wy,2,wallH);
+    g.fillRect(x+w-2,wy,2,wallH);
+    /* one diagonal brace for character */
+    for(let i=0;i<6;i++)g.fillRect(x+3+i,wy+3+i,2,1);
+  } else {
+    for(let i=0;i<b.tw;i++){
+      g.fillStyle=PAL.stone; g.fillRect(x+i*16,wy,16,wallH);
+      g.fillStyle=PAL.stoneD;
+      g.fillRect(x+i*16,wy+5,16,1); g.fillRect(x+i*16,wy+11,16,1);
+      g.fillRect(x+i*16+6,wy,1,5); g.fillRect(x+i*16+11,wy+6,1,5);
+    }
+  }
+
+  /* windows: frame + shutter, glow at night */
+  g.fillStyle=PAL.beam;
+  const winY=wy+3;
+  function win(wxp){
+    g.fillStyle=PAL.beam; g.fillRect(wxp-1,winY-1,7,7);
+    g.fillStyle=lit?PAL.win:PAL.winDay; g.fillRect(wxp,winY,5,5);
+    g.fillStyle=PAL.beam; g.fillRect(wxp+2,winY,1,5);
+  }
+  if(b.tw>=4){ win(x+5); win(x+w-11); }
+  if(b.tw>=6) win(x+Math.floor(w/2)+8);
+
+  /* door with step + arch */
   const dx=b.door*16-cx;
-  g.fillStyle=PAL.door; g.fillRect(dx+4,y+h-13,8,13);
-  g.fillStyle=PAL.window;
-  if(b.tw>4){ g.fillRect(x+6,y+h-12,5,5); g.fillRect(x+w-11,y+h-12,5,5); }
+  g.fillStyle=PAL.beam;  g.fillRect(dx+3,wy+1,10,wallH-1);
+  g.fillStyle=PAL.door;  g.fillRect(dx+4,wy+2,8,wallH-2);
+  g.fillStyle='#c9992a'; g.fillRect(dx+10,wy+8,1,2);        // handle
+  g.fillStyle=PAL.stoneL;g.fillRect(dx+3,y+h-1,10,2);       // step
+
+  /* roof by style, slight overhang */
+  const ry0=y-10, ry1=wy-2, rh=ry1-ry0;
+  const rx=x-2, rw=w+4;
+  if(b.roof==='thatch'){
+    g.fillStyle=PAL.thatch; g.fillRect(rx,ry0,rw,rh);
+    g.fillStyle=PAL.thatchD;
+    for(let ry=ry0+3;ry<ry1;ry+=4)
+      for(let bx=rx+((ry/4)%2?3:0);bx<rx+rw-3;bx+=7) g.fillRect(bx,ry,4,1);
+    /* ragged bottom edge */
+    for(let bx=rx;bx<rx+rw;bx+=3) g.fillRect(bx,ry1-1+((bx/3)%2),3,2);
+    g.fillStyle=PAL.thatchR; g.fillRect(rx,ry0,rw,3);
+    g.fillStyle='#e0c070'; g.fillRect(rx,ry0+3,rw,1);
+  } else if(b.roof==='slate'){
+    g.fillStyle=PAL.slate; g.fillRect(rx,ry0,rw,rh);
+    g.fillStyle=PAL.slateD;
+    for(let ry=ry0+3;ry<ry1;ry+=4) g.fillRect(rx,ry,rw,1);
+    g.fillStyle='#77879b';
+    for(let ry=ry0+3;ry<ry1;ry+=4)
+      for(let bx=rx+((ry/4)%2?4:0);bx<rx+rw-2;bx+=8) g.fillRect(bx,ry-1,3,1);
+    g.fillStyle=PAL.slateR; g.fillRect(rx,ry0,rw,2);
+    g.fillRect(rx,ry1-1,rw,2);
+  } else { /* shingle */
+    g.fillStyle=PAL.shingle; g.fillRect(rx,ry0,rw,rh);
+    g.fillStyle=PAL.shingleD;
+    for(let ry=ry0+3;ry<ry1;ry+=5) g.fillRect(rx,ry,rw,2);
+    g.fillStyle=PAL.shingleR; g.fillRect(rx,ry0,rw,2);
+    g.fillRect(rx,ry1-1,rw,2);
+  }
+
+  /* chimney */
+  if(b.chim){
+    const chx=x+w-14, chy=y-16;
+    g.fillStyle=PAL.stoneD; g.fillRect(chx,chy,6,12);
+    g.fillStyle=PAL.stone;  g.fillRect(chx+1,chy+1,4,10);
+    g.fillStyle=PAL.stoneL; g.fillRect(chx-1,chy,8,2);
+  }
+
+  /* hanging tavern sign */
+  if(b.sign){
+    const sx=dx+16, sy=wy-4;
+    g.fillStyle=PAL.beam; g.fillRect(sx,sy,1,4); g.fillRect(sx-4,sy,9,1);
+    g.fillStyle='#7a5a2e'; g.fillRect(sx-4,sy+4,9,7);
+    g.fillStyle='#e0c070'; g.fillRect(sx-3,sy+5,7,5);
+    g.fillStyle='#8c4626';                                   // the mug
+    g.fillRect(sx-1,sy+6,3,3); g.fillRect(sx+2,sy+7,1,1);
+  }
+}
+
+function drawProp(p,cx,cy){
+  const x=Math.round(p.x-cx), y=Math.round(p.y-cy);
+  if(p.type==='well'){
+    g.fillStyle=PAL.stoneD; g.fillRect(x-7,y-8,14,8);
+    g.fillStyle=PAL.stone;  g.fillRect(x-6,y-7,12,5);
+    g.fillStyle='#1d3d54';  g.fillRect(x-4,y-6,8,3);
+    g.fillStyle=PAL.beam;   g.fillRect(x-6,y-16,2,9); g.fillRect(x+4,y-16,2,9);
+    g.fillStyle=PAL.shingleD; g.fillRect(x-8,y-19,16,4);
+    g.fillStyle=PAL.shingleR; g.fillRect(x-8,y-19,16,1);
+    g.fillStyle='#4a3520';  g.fillRect(x-1,y-15,1,6);        // rope
+    g.fillStyle='#6b543a';  g.fillRect(x-2,y-9,4,3);         // bucket
+  } else if(p.type==='stall'){
+    g.fillStyle=PAL.beam; g.fillRect(x-8,y-12,2,12); g.fillRect(x+6,y-12,2,12);
+    g.fillStyle='#b8442f';
+    for(let i=0;i<5;i++){ g.fillStyle=i%2?'#e8e2d0':'#b8442f';
+      g.fillRect(x-10+i*4,y-15,4,4); }
+    g.fillStyle=PAL.plank; g.fillRect(x-8,y-6,16,3);
+    g.fillStyle='#e06a30'; g.fillRect(x-6,y-8,3,2);          // wares
+    g.fillStyle='#7a9a3e'; g.fillRect(x-1,y-8,3,2);
+    g.fillStyle='#e8c85a'; g.fillRect(x+4,y-8,3,2);
+  } else if(p.type==='barrel'){
+    g.fillStyle='#74562f'; g.fillRect(x-4,y-9,8,9);
+    g.fillStyle='#8a6a42'; g.fillRect(x-3,y-8,6,7);
+    g.fillStyle='#4a3520'; g.fillRect(x-4,y-7,8,1); g.fillRect(x-4,y-4,8,1);
+  } else if(p.type==='crate'){
+    g.fillStyle='#8a6a42'; g.fillRect(x-4,y-8,9,8);
+    g.fillStyle='#74562f'; g.fillRect(x-4,y-8,9,1); g.fillRect(x-4,y-1,9,1);
+    g.fillRect(x-4,y-8,1,8); g.fillRect(x+4,y-8,1,8);
+    g.fillRect(x-4,y-8,9,8*0); g.fillRect(x-3,y-5,7,1);
+  } else if(p.type==='fence'){
+    g.fillStyle=PAL.beam;
+    g.fillRect(x-8,y-6,2,6); g.fillRect(x+6,y-6,2,6);
+    g.fillRect(x-8,y-5,16,1); g.fillRect(x-8,y-2,16,1);
+  } else if(p.type==='crop'){
+    g.fillStyle=PAL.crop;
+    for(let i=0;i<3;i++){ g.fillRect(x-6+i*5,y-4,2,4); g.fillRect(x-7+i*5,y-5,4,2); }
+  } else if(p.type==='flower'){
+    const cols=[PAL.flower1,PAL.flower2,PAL.flower3];
+    for(let i=0;i<4;i++){
+      g.fillStyle=cols[(p.seed+i)%3];
+      g.fillRect(x-5+((p.seed*7+i*5)%10), y-2-((p.seed+i*3)%4), 2,2);
+    }
+    g.fillStyle=PAL.grassC; g.fillRect(x-4,y-1,8,1);
+  }
 }
 
 function drawTree(t,cx,cy){
@@ -850,17 +1126,25 @@ function drawWolf(w,cx,cy){
     g.fillStyle=PAL.hp; g.fillRect(x-7,y-16,Math.round(14*w.hp/w.hpMax),2);
   }
 }
+function drawSpectator(s,cx,cy){
+  const x=Math.round(s.x-cx), y=Math.round(s.y-cy);
+  if(x<-12||x>LW+12||y<-12||y>LH+12)return;
+  g.save(); g.globalAlpha=0.9;
+  g.translate(x,y);
+  if(s.face<0)g.scale(-1,1);
+  g.drawImage(WOLF_SPR[s.frame],-9,-11);
+  g.restore();
+}
 
 function drawPlayer(cx,cy){
   const x=Math.round(player.x-cx), y=Math.round(player.y-cy);
   const spr=player.spr[player.dir][player.moving?player.frame:0];
-  if(player.iframes>0 && Math.floor(performance.now()/60)%2)return; // i-frame blink
+  if(player.iframes>0 && Math.floor(performance.now()/60)%2)return;
   g.drawImage(spr, x-8, y-19);
   if(player.flashT>0){
     g.save();g.globalAlpha=player.flashT*5;g.globalCompositeOperation='lighter';
     g.fillStyle='#f00';g.fillRect(x-8,y-19,16,20);g.restore();
   }
-  // flow rim light
   if(flowT>=B.FLOW_TIERS[0][0]){
     let col=PAL.aether;
     if(flowT>=35)col=PAL.flow4; else if(flowT>=20)col=PAL.flow3;
@@ -871,73 +1155,61 @@ function drawPlayer(cx,cy){
   }
 }
 
-/* ---------------- HUD ---------------------------------------- */
+/* ---------------- HUD -------------------------------------------------- */
 function drawHUD(){
-  const pad=4;
+  const pad=3;
   g.font='7px monospace'; g.textBaseline='top';
-  // HP
-  g.fillStyle=PAL.hpBack; g.fillRect(pad,pad,52,6);
-  g.fillStyle=PAL.hp; g.fillRect(pad,pad,Math.round(52*player.hp/player.hpMax),6);
-  g.strokeStyle='#00000066'; g.strokeRect(pad+0.5,pad+0.5,52,6);
-  // Aether
-  const ax = pad, ay = pad+9;
+  g.fillStyle=PAL.hpBack; g.fillRect(pad,pad,44,5);
+  g.fillStyle=PAL.hp; g.fillRect(pad,pad,Math.round(44*player.hp/player.hpMax),5);
+  const ax=pad, ay=pad+7;
   const shk = shakeAether>0 ? Math.round(Math.sin(performance.now()/25)*2) : 0;
-  g.fillStyle=PAL.aetherBack; g.fillRect(ax+shk,ay,52,5);
+  g.fillStyle=PAL.aetherBack; g.fillRect(ax+shk,ay,44,4);
   const full = player.aether>=player.aetherMax-0.5;
   g.fillStyle = full?PAL.aetherHi:PAL.aether;
-  g.fillRect(ax+shk,ay,Math.round(52*player.aether/player.aetherMax),5);
+  g.fillRect(ax+shk,ay,Math.round(44*player.aether/player.aetherMax),4);
   g.fillStyle=PAL.hud;
-  g.fillText('\u25cd '+Math.floor(player.aether), ax+56+shk, ay-1);
-  // flow tier
+  g.fillText('\u25cd'+Math.floor(player.aether), ax+47+shk, ay-2);
   if(flowT>=4){
     let label='FLOW'; if(flowT>=35)label='ASCENDANT';
     else if(flowT>=20)label='FLOW III'; else if(flowT>=10)label='FLOW II';
-    g.fillStyle=PAL.flow3; g.fillText(label, pad, ay+8);
+    g.fillStyle=PAL.flow3; g.fillText(label, pad, ay+6);
   }
-  // clock + day
   const hh=Math.floor(gameT/60)%24, mm=Math.floor(gameT%60);
-  const clock=('0'+hh).slice(-2)+':'+('0'+mm).slice(-2);
+  const clock='D'+dayN+' '+('0'+hh).slice(-2)+':'+('0'+mm).slice(-2);
   g.fillStyle=PAL.hudDim;
-  const cw=g.measureText('Day '+dayN+'  '+clock).width;
-  g.fillText('Day '+dayN+'  '+clock, LW-cw-pad, pad);
-  // coins
+  g.fillText(clock, LW-g.measureText(clock).width-pad, pad);
   g.fillStyle=PAL.coin;
-  const cs='\u25c9 '+player.coins;
-  g.fillText(cs, LW-g.measureText(cs).width-pad, pad+9);
-  // town-safe banner
+  const cs='\u25c9'+player.coins;
+  g.fillText(cs, LW-g.measureText(cs).width-pad, pad+8);
   if(inTown(player.x,player.y)){
     g.fillStyle=PAL.hudDim;
     const s='HAVENBROOK \u2014 SAFE';
     g.fillText(s,(LW-g.measureText(s).width)/2, pad);
   }
-  // hint band (§4.1: one line, top, never a modal)
   if(activeHint){
     const a = activeHint.leaving!==undefined?Math.max(0,activeHint.leaving*2):1;
     const txt = activeHint.h.text;
     g.save(); g.globalAlpha=a*0.85;
-    const w = g.measureText(txt).width+12;
-    const bx=(LW-w)/2, by=14;
-    g.fillStyle='#000'; g.fillRect(bx,by,w,11);
+    const w = Math.min(LW-4, g.measureText(txt).width+10);
+    const bx=(LW-w)/2, by=12;
+    g.fillStyle='#000'; g.fillRect(bx,by,w,10);
     g.globalAlpha=a; g.fillStyle=PAL.hud;
     const pulse = activeHint.t>B.HINT_ESCALATE_S && Math.floor(performance.now()/400)%2;
     if(pulse)g.fillStyle='#ffe9a0';
-    g.fillText(txt, bx+6, by+2);
+    g.fillText(txt, bx+5, by+2);
     g.restore();
   }
 }
 
-/* touch overlays: stick + buttons */
 function drawTouch(){
-  // stick
   if(stick.active){
     g.save(); g.globalAlpha=0.25;
     g.strokeStyle='#fff'; g.lineWidth=1;
-    g.beginPath(); g.arc(stick.ox,stick.oy,26,0,Math.PI*2); g.stroke();
+    g.beginPath(); g.arc(stick.ox,stick.oy,22,0,Math.PI*2); g.stroke();
     g.globalAlpha=0.4; g.fillStyle='#fff';
-    g.beginPath(); g.arc(stick.ox+stick.dx,stick.oy+stick.dy,9,0,Math.PI*2); g.fill();
+    g.beginPath(); g.arc(stick.ox+stick.dx,stick.oy+stick.dy,8,0,Math.PI*2); g.fill();
     g.restore();
   }
-  // buttons
   for(const k in buttons){
     const b=buttons[k];
     let on=true, ring=0;
@@ -952,7 +1224,7 @@ function drawTouch(){
     g.strokeStyle = on?PAL.aether:'#555';
     g.lineWidth=1.5;
     if(k==='A'&&on&&Math.floor(performance.now()/350)%2)
-      g.strokeStyle=PAL.aetherHi;                     // pulse when affordable
+      g.strokeStyle=PAL.aetherHi;
     g.beginPath(); g.arc(b.x,b.y,b.r,0,Math.PI*2); g.stroke();
     if(k==='A'&&ring>0&&ring<1){
       g.strokeStyle=PAL.aether; g.globalAlpha=0.5;
@@ -966,7 +1238,7 @@ function drawTouch(){
   }
 }
 
-/* ---------------- fixed 60 Hz loop ---------------------------- */
+/* ---------------- fixed 60 Hz loop -------------------------------------- */
 let last=performance.now(), acc=0;
 function frame(now){
   let ft = now-last; last=now;
