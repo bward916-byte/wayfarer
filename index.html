@@ -18,7 +18,10 @@
 <script>
 'use strict';
 /* ============================================================
-   WAYFARER — P1 v7 (spec v3.4)
+   WAYFARER — P1 v8 (spec v3.4)
+   v8: coin now buys things — forge and goods shops with tiered gear, an inn bed,
+       chapel mending, watchhouse bounties, bandages on a button, treasure chests
+       out on the roads, and two new beasts (direwolf, shrike) mixed by depth.
    v7: hit/death feedback rebuilt (impact spark + squash on hit, the body
        collapses and darkens on death — no white silhouette anywhere), enterable
        buildings with furnished interiors and shopkeepers, Havenbrook rebuilt into
@@ -230,6 +233,56 @@ function buildWolf(){
 }
 const WOLF_SPR = buildWolf();
 
+function buildDire(){          /* heavier, blacker, shaggy ridge */
+  const out=[];
+  for(let f=0;f<2;f++){
+    const [c,x]=mkCanvas(24,16);
+    x.fillStyle='#3e3a34';
+    x.fillRect(4,4,14,7); x.fillRect(16,1,7,5);
+    x.fillStyle='#2b2823';
+    x.fillRect(0,3,5,3); x.fillRect(20,5,3,3);
+    x.fillRect(5+(f?1:0),11,3,5); x.fillRect(13-(f?1:0),11,3,5);
+    x.fillStyle='#4e4841';                    /* ridge */
+    x.fillRect(6,2,10,2); x.fillRect(8,1,2,1); x.fillRect(12,1,2,1);
+    x.fillStyle='#ff7a4a'; x.fillRect(19,2,2,1);
+    x.fillStyle='#2b2823'; x.fillRect(17,0,3,1);
+    out.push(c);
+  }
+  return out;
+}
+function buildShrike(){        /* small, fast, pale, low to the ground */
+  const out=[];
+  for(let f=0;f<2;f++){
+    const [c,x]=mkCanvas(14,10);
+    x.fillStyle='#a89a7e';
+    x.fillRect(2,3,7,4); x.fillRect(8,1,5,3);
+    x.fillStyle='#8a7c62';
+    x.fillRect(0,2,3,2);
+    x.fillRect(3+(f?1:0),7,2,3); x.fillRect(7-(f?1:0),7,2,3);
+    x.fillStyle='#e8e2d0'; x.fillRect(4,2,4,1);
+    x.fillStyle='#ffd24a'; x.fillRect(11,2,1,1);
+    out.push(c);
+  }
+  return out;
+}
+const DIRE_SPR=buildDire(), SHRIKE_SPR=buildShrike();
+
+const BEASTS={
+  wolf:  {spr:()=>WOLF_SPR,   ox:9, oy:11, hp:1.0,  dmg:1.0, speed:1.0,  cd:[1,2.5], name:'wolf'},
+  dire:  {spr:()=>DIRE_SPR,   ox:12,oy:15, hp:2.4,  dmg:1.7, speed:0.82, cd:[2,3.6], name:'direwolf'},
+  shrike:{spr:()=>SHRIKE_SPR, ox:7, oy:9,  hp:0.55, dmg:0.7, speed:1.45, cd:[0.6,1.4],name:'shrike'}
+};
+function beastRoll(depth, branch){
+  if(depth<=0) return 'wolf';
+  const r=rng();
+  const direChance = depth>=3 ? Math.min(0.24, 0.06+depth*0.028) : 0;
+  if(r<direChance) return 'dire';
+  const thorny = (branch==='E'||branch==='S');
+  const shrikeChance = depth>=2 ? (thorny?0.50:0.26) : (thorny?0.18:0.08);
+  if(r<direChance+shrikeChance) return 'shrike';
+  return 'wolf';
+}
+
 /* villager palettes — five shared dolls, reused across every settlement */
 const NPC_SPR = [
   buildDoll({skin:'#e8b98a',hair:'#6b4a24',tunic:'#7a5a3a',legs:'#4a3a28'}),
@@ -311,7 +364,7 @@ function onVerge(px,py){
 }
 
 const buildings=[], trees=[], lamps=[], props=[], wallTiles=[], glints=[], decor=[];
-const cliffs=[], rocks=[], npcs=[], doors=[];
+const cliffs=[], rocks=[], npcs=[], doors=[], chests=[];
 let exits=[];
 let interiorSave=null;
 let region={branch:null, depth:0, name:'Havenbrook Vale', interior:false, settlement:true};
@@ -324,8 +377,31 @@ function clearWorld(w,h){
   ground.fill(GID.grass0); solid.fill(0); flags.fill(0);
   buildings.length=0; trees.length=0; lamps.length=0; props.length=0;
   wallTiles.length=0; glints.length=0; decor.length=0;
-  cliffs.length=0; rocks.length=0; npcs.length=0; doors.length=0;
+  cliffs.length=0; rocks.length=0; npcs.length=0; doors.length=0; chests.length=0;
   exits=[];
+}
+function addChest(tx,ty,tier){
+  if(!inMap(tx,ty)||solid[idx(tx,ty)])return null;
+  const c={x:tx*16+8, y:ty*16+13, tx,ty, tier:tier||1, opened:false, t:0};
+  chests.push(c); solid[idx(tx,ty)]=1;
+  return c;
+}
+function openChest(c){
+  c.opened=true; c.t=0;
+  solid[idx(c.tx,c.ty)]=0;
+  const n=6+c.tier*5+RI(0,4);
+  for(let i=0;i<n;i++){
+    const a=R(0,Math.PI*2), sp=R(35,105);
+    coins.push({x:c.x,y:c.y-6,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-30,t:0});
+  }
+  for(let i=0;i<12;i++){
+    const a=R(-2.6,-0.5), sp=R(30,80);
+    particles.push({x:c.x,y:c.y-8,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,
+      t:R(0.3,0.7),col: i%2?'#ffd24a':'#fff4d0',sz:1});
+  }
+  if(rng()<0.45+c.tier*0.12){ player.bandages++; say('A chest \u2014 coin and a bandage.'); }
+  else say('A chest \u2014 coin.');
+  beep(880,0.14,0.05,'triangle');
 }
 function addProp(type,tx,ty,solidTile,extra){
   const p={type,x:tx*16+8,y:ty*16+16,tx,ty,seed:RI(0,99)};
@@ -449,10 +525,13 @@ function enterBuilding(b){
   wolves.length=0; projectiles.length=0; particles.length=0; sparks.length=0;
   novas.length=0; spectators.length=0; animals.length=0; ripples.length=0;
   flocks.length=0; frostPatches.length=0; _anchors=null;
-  banner={name:b.name||BKINDS[b.kind].label, sub:'INSIDE', t:2.6};
+  const roleHint={tavern:'BED \u00b7 10 COIN',smithy:'ARMS & ARMOUR',store:'GOODS',
+    chapel:'MENDING',guard:'BOUNTIES',stable:'STABLES',home:'A HOME'};
+  banner={name:b.name||BKINDS[b.kind].label, sub:roleHint[b.kind]||'INSIDE', t:2.4};
   beep(400,0.06,0.035,'sine');
 }
 function leaveBuilding(){
+  ui=null;
   const sv=interiorSave; interiorSave=null;
   if(!sv){ return; }
   wolves.length=0; projectiles.length=0; particles.length=0; sparks.length=0;
@@ -500,22 +579,22 @@ function genInterior(b){
     for(let i=0;i<2;i++){ P('table',3+i*4,3,true); P('stool',2+i*4,3,false); P('stool',5+i*4,3,false); }
     P('counter',cx-2,1,true); P('counter',cx-1,1,true); P('counter',cx,1,true);
     P('kegs',1,1,true); P('shelf',2,1,true);
-    npcs.push(mkNpc(cx-1,2,'Maera','Ale\u2019s warm, the road\u2019s cold. Sit a while.',true));
+    npcs.push(mkNpc(cx-1,2,'Maera','Ale\u2019s warm, the road\u2019s cold. A bed is 10 coin.',true,'inn'));
     npcs.push(mkNpc(4,5,'a drover','Wolves thicker past the second gate. Mind yourself.',false));
   } else if(kind==='smithy'){
     P('forge',w-3,1,true); P('anvil',cx,3,true);
     P('rack',1,1,true); P('barrel',2,1,true); P('crate',w-2,4,true);
-    npcs.push(mkNpc(cx,2,'Orrin','Bring me iron and I\u2019ll bring you an edge.',true));
+    npcs.push(mkNpc(cx,2,'Orrin','Bring me iron and I\u2019ll bring you an edge.',true,'smith'));
   } else if(kind==='store'){
     for(let tx=2;tx<w-2;tx++) P('counter',tx,3,true);
     for(let tx=1;tx<w-1;tx++) if(tx%2) P('shelf',tx,1,true);
     P('sack',1,5,false); P('sack',2,5,false); P('barrel',w-2,5,true);
-    npcs.push(mkNpc(cx,2,'Wick','Rope, salt, lamp oil. Coin first, questions after.',true));
+    npcs.push(mkNpc(cx,2,'Wick','Rope, salt, lamp oil. Coin first, questions after.',true,'shop'));
   } else if(kind==='chapel'){
     P('altar',cx,1,true);
     for(let i=0;i<3;i++){ P('pew',cx-2,3+i,true); P('pew',cx+2,3+i,true); }
     P('candles',cx-1,1,false); P('candles',cx+1,1,false);
-    npcs.push(mkNpc(cx,2,'Sister Enna','The water holds. The lamps hold. So do we.',true));
+    npcs.push(mkNpc(cx,2,'Sister Enna','The water holds. The lamps hold. So do we.',true,'chapel'));
   } else if(kind==='stable'){
     for(let tx=1;tx<w-1;tx+=3) P('hay',tx,1,true);
     P('trough',cx,4,true); P('rack',w-2,2,true);
@@ -523,7 +602,7 @@ function genInterior(b){
   } else if(kind==='guard'){
     P('rack',1,1,true); P('rack',2,1,true); P('table',cx,3,true);
     P('bed',w-3,1,true);
-    npcs.push(mkNpc(cx,2,'Serjeant Balt','Road\u2019s open. Staying open is your problem.',true));
+    npcs.push(mkNpc(cx,2,'Serjeant Balt','Road\u2019s open. Staying open is your problem.',true,'watch'));
   } else {
     P('bed',1,1,true); P('table',cx+1,3,true); P('stool',cx,3,false);
     P('hearth',w-3,1,true); P('shelf',2,1,true); P('crate',w-2,5,true);
@@ -533,10 +612,42 @@ function genInterior(b){
   }
   lamps.push({x:cx*16+8, y:2*16+8});
 }
-function mkNpc(tx,ty,name,line,fixed){
+function mkNpc(tx,ty,name,line,fixed,role){
   return {x:tx*16+8, y:ty*16+12, dir:'down', frame:0, animT:0, moving:false,
     spr:NPC_SPR[RI(0,NPC_SPR.length-1)], name:name, line:line, fixed:!!fixed,
+    role:role||null,
     hx:tx*16+8, hy:ty*16+12, wanderT:R(0,3), wa:R(0,6.28), wm:false};
+}
+const ROLE_VERB={shop:'TRADE', smith:'FORGE', inn:'REST', chapel:'PRAY', watch:'BOUNTY'};
+function contextAction(){
+  if(region.interior){
+    let best=null,bd=30;
+    for(const n of npcs){
+      if(!n.role)continue;
+      const d=Math.hypot(n.x-player.x,n.y-player.y);
+      if(d<bd){bd=d;best=n;}
+    }
+    if(best) return {kind:'npc', npc:best, label:ROLE_VERB[best.role]};
+  }
+  let bc=null,cd=26;
+  for(const c of chests){
+    if(c.opened)continue;
+    const d=Math.hypot(c.x-player.x,c.y-player.y);
+    if(d<cd){cd=d;bc=c;}
+  }
+  if(bc) return {kind:'chest', chest:bc, label:'OPEN'};
+  return null;
+}
+function doContext(){
+  const a=contextAction();
+  if(!a) return;
+  if(a.kind==='chest'){ openChest(a.chest); return; }
+  const r=a.npc.role;
+  if(r==='shop')       ui={mode:'shop', npc:a.npc, keys:STOCK.store.slice(), title:a.npc.name};
+  else if(r==='smith') ui={mode:'shop', npc:a.npc, keys:STOCK.smithy.slice(), title:a.npc.name};
+  else if(r==='inn')   restAtInn();
+  else if(r==='chapel')chapelHeal();
+  else if(r==='watch') bountyAction();
 }
 
 function gatePos(d){
@@ -770,6 +881,7 @@ function genVale(){
     if(!inMap(tx,ty))continue;
     glints.push({x:tx*16+RI(2,13),y:ty*16+RI(2,13),ph:R(0,6.28),sp:R(0.4,1.4)});
   }
+  scatterChests(2, true);
   genDecor();
 }
 
@@ -834,6 +946,29 @@ const TOWNS={
 function townInfo(b,d){ return (TOWNS[b]&&TOWNS[b][d]) || {name:BRANCHES[b].label+' Camp',blurb:'a roadside camp'}; }
 
 /* a palisaded settlement straddling the road, deep on a branch */
+function scatterChests(n, valeMode){
+  let placed=0;
+  for(let tries=0;tries<400 && placed<n;tries++){
+    const tx=RI(BORDER+1,MW-BORDER-2), ty=RI(BORDER+1,MH-BORDER-2);
+    if(!inMap(tx,ty)||sideOf(tx,ty))continue;
+    const i=idx(tx,ty);
+    if(solid[i])continue;
+    if(flags[i]&2)continue;
+    const gd=ground[i];
+    if(gd===GID.water||gd===GID.road||gd===GID.plank)continue;
+    if(valeMode&&inR(tx,ty,BANK.x0-2,BANK.y0-2,BANK.x1+2,BANK.y1+2))continue;
+    if(Math.abs(tx-RX)<4&&Math.abs(ty-RY)<4)continue;
+    /* tucked away: prefer a spot with cover beside it */
+    let cover=0;
+    for(const d of [[1,0],[-1,0],[0,1],[0,-1]])
+      if(inMap(tx+d[0],ty+d[1])&&solid[idx(tx+d[0],ty+d[1])])cover++;
+    if(cover===0 && tries<300)continue;
+    if(cover>=4)continue;
+    addChest(tx,ty,1+Math.min(3,Math.floor(region.depth/2)));
+    placed++;
+  }
+}
+
 function genTown(branchKey, depth){
   clearWorld();
   const info=townInfo(branchKey,depth);
@@ -964,6 +1099,7 @@ function genTown(branchKey, depth){
     if(!inMap(tx,ty)||inR(tx,ty,X0-3,Y0-3,X1+3,Y1+3))continue;
     glints.push({x:tx*16+RI(2,13),y:ty*16+RI(2,13),ph:R(0,6.28),sp:R(0.4,1.4)});
   }
+  scatterChests(2+Math.floor(depth/2));
   genDecor();
 }
 
@@ -1106,6 +1242,7 @@ function genWild(branchKey, depth){
     glints.push({x:tx*16+RI(2,13),y:ty*16+RI(2,13),ph:R(0,6.28),sp:R(0.4,1.4)});
   }
 
+  scatterChests(3+Math.floor(depth/2));
   genDecor();
 }
 
@@ -1135,6 +1272,7 @@ const player = {
   coins:0, iframes:0, dodgeT:0, dodgeVX:0, dodgeVY:0,
   fireT:0, lastHitT:-99, flashT:0,
   moving:false, moveSamples:[],
+  gear:{sling:0, armor:0, boots:0, focus:0}, bandages:1, kills:0,
   spr: buildDoll({skin:PAL.skin, hair:PAL.hair, tunic:PAL.tunic, legs:PAL.legs})
 };
 let gameT = 8*60, dayN = 1, clockAcc = 0;
@@ -1144,15 +1282,137 @@ let flockT = 12, rustleT = 0;
 for(let i=0;i<3;i++)clouds.push({x:R(0,MW*16),y:R(0,MH*16),
   rx:R(55,95),ry:R(26,42),vx:R(4,8)});
 let hitstop=0, flowT=0, flowActive=false;
+let bounty=null;                    // {need,have,reward,depth,done}
+let ui=null;                        // open panel, freezes the world
+let toast=null;                     // {text,t}
+
+const GEAR_SLING=[1,1.35,1.75,2.20];
+const GEAR_HP   =[0,25,50,80];
+const GEAR_DODGE=[1,0.78,0.58,0.58];
+const GEAR_FOCUS=[1,1.30,1.62,1.62];
+const slingDmg  = ()=>B.SLING.dmg*GEAR_SLING[player.gear.sling];
+const maxHp     = ()=>100+GEAR_HP[player.gear.armor];
+const dodgeCost = ()=>Math.round(B.DODGE_COST*GEAR_DODGE[player.gear.boots]);
+const focusMult = ()=>GEAR_FOCUS[player.gear.focus];
+function say(t){ toast={text:t,t:0}; }
+
+const GOODS={
+  bandage:{name:'Bandage',        price:12,  desc:'Heal 40 when used'},
+  boots1:{name:'Roadworn Boots',  price:45,  gear:'boots', lvl:1, desc:'Dodge costs less Aether'},
+  boots2:{name:'Courier Boots',   price:120, gear:'boots', lvl:2, desc:'Dodge costs far less'},
+  focus1:{name:'Aether Focus',    price:70,  gear:'focus', lvl:1, desc:'Aether builds faster'},
+  focus2:{name:'Deep Focus',      price:165, gear:'focus', lvl:2, desc:'Aether builds much faster'},
+  sling1:{name:'Weighted Sling',  price:60,  gear:'sling', lvl:1, desc:'+35% shot damage'},
+  sling2:{name:'Hunter Sling',    price:145, gear:'sling', lvl:2, desc:'+75% shot damage'},
+  sling3:{name:'Warden Sling',    price:310, gear:'sling', lvl:3, desc:'+120% shot damage'},
+  armor1:{name:'Padded Coat',     price:55,  gear:'armor', lvl:1, desc:'+25 max health'},
+  armor2:{name:'Ringmail',        price:135, gear:'armor', lvl:2, desc:'+50 max health'},
+  armor3:{name:'Warden Plate',    price:290, gear:'armor', lvl:3, desc:'+80 max health'}
+};
+const STOCK={
+  store:['bandage','boots1','boots2','focus1','focus2'],
+  smithy:['sling1','sling2','sling3','armor1','armor2','armor3']
+};
+function goodState(k){
+  const g=GOODS[k];
+  if(!g.gear) return 'buy';
+  const have=player.gear[g.gear];
+  if(have>=g.lvl) return 'owned';
+  if(have<g.lvl-1) return 'locked';
+  return 'buy';
+}
+function buyGood(k){
+  const g=GOODS[k];
+  if(!g){ return; }
+  if(ui&&ui.keys&&ui.keys.indexOf(k)<0){ say('They don\u2019t deal in that here.'); return; }
+  const st=goodState(k);
+  if(st==='owned'){ say('You already carry that.'); return; }
+  if(st==='locked'){ say('Buy the earlier one first.'); return; }
+  if(player.coins<g.price){ say('Not enough coin.'); beep(150,0.08,0.04,'square'); return; }
+  player.coins-=g.price;
+  if(g.gear){
+    player.gear[g.gear]=g.lvl;
+    if(g.gear==='armor'){ const d=maxHp()-player.hpMax; player.hpMax=maxHp(); player.hp+=d; }
+    say(g.name+' \u2014 fitted.');
+  } else {
+    player.bandages++;
+    say('Bandage stowed. ('+player.bandages+')');
+  }
+  beep(760,0.09,0.045,'triangle');
+}
+function useBandage(){
+  if(player.bandages<=0){ say('No bandages left.'); beep(150,0.06,0.03,'square'); return; }
+  if(player.hp>=player.hpMax){ say('Nothing to bind.'); return; }
+  player.bandages--;
+  player.hp=Math.min(player.hpMax, player.hp+40);
+  for(let i=0;i<10;i++){
+    const a=R(0,6.28);
+    particles.push({x:player.x,y:player.y-8,vx:Math.cos(a)*22,vy:Math.sin(a)*22-14,
+      t:R(0.3,0.6),col:'#8ce0a0',sz:1});
+  }
+  say('Bound up. ('+player.bandages+' left)');
+  beep(560,0.12,0.045,'sine');
+}
+function restAtInn(){
+  const cost=10;
+  if(player.coins<cost){ say('A bed costs '+cost+' coin.'); return; }
+  player.coins-=cost;
+  player.hp=player.hpMax; player.aether=0;
+  const h=hourNow();
+  gameT = (h>=7? (24+7):7)*60;
+  if(gameT>=24*60){ gameT-=24*60; dayN++; }
+  say('You sleep until morning.');
+  beep(330,0.25,0.04,'sine');
+}
+function chapelHeal(){
+  if(player.hp>=player.hpMax){ say('You are already whole.'); return; }
+  player.hp=player.hpMax;
+  for(let i=0;i<16;i++){
+    const a=R(0,6.28);
+    particles.push({x:player.x,y:player.y-10,vx:Math.cos(a)*18,vy:Math.sin(a)*18-20,
+      t:R(0.4,0.9),col:'#cfe4ff',sz:1});
+  }
+  say('The still water holds. Go on.');
+  beep(660,0.3,0.04,'sine');
+}
+function bountyAction(){
+  if(bounty&&!bounty.done){
+    if(bounty.have>=bounty.need){
+      bounty.done=true;
+      player.coins+=bounty.reward;
+      say('Bounty paid: '+bounty.reward+' coin.');
+      beep(820,0.18,0.05,'triangle');
+      bounty=null;
+    } else say('Bounty: '+bounty.have+' of '+bounty.need+' culled.');
+    return;
+  }
+  const d=Math.max(1,renown);
+  bounty={need:6+d*2, have:0, reward:30+d*18, depth:d, done:false};
+  say('Bounty taken: cull '+bounty.need+' for '+bounty.reward+' coin.');
+  beep(520,0.12,0.04,'triangle');
+}
 
 function spawnWolfPack(cx,cy,n){
   const dep=region.depth;
-  const HP=Math.round(30*(1+dep*0.55)), DMG=1+dep*0.32;
+  const base=30*(1+dep*0.55), dmgBase=1+dep*0.32;
   for(let i=0;i<n;i++){
-    const a=R(0,Math.PI*2), d=R(10,40);
+    const kind=beastRoll(dep, region.branch);
+    const K=BEASTS[kind];
+    let a=R(0,Math.PI*2), d=R(10,40);
+    let px=cx+Math.cos(a)*d, py=cy+Math.sin(a)*d;
+    for(let t=0;t<12;t++){
+      const ttx=Math.floor(px/16), tty=Math.floor(py/16);
+      const ok2 = inMap(ttx,tty) && !solid[idx(ttx,tty)] && !(flags[idx(ttx,tty)]&2);
+      if(ok2) break;
+      a=R(0,Math.PI*2); d=R(6,30);
+      px=cx+Math.cos(a)*d; py=cy+Math.sin(a)*d;
+      if(t>=11){ px=cx; py=cy; }
+    }
+    const hp=Math.max(8,Math.round(base*K.hp));
     wolves.push({
-      x:cx+Math.cos(a)*d, y:cy+Math.sin(a)*d,
-      hp:HP, hpMax:HP, dmg:DMG, face:1, frame:0, animT:0, flashT:0,
+      x:px, y:py,
+      kind:kind, spr:K.spr(), ox:K.ox, oy:K.oy, sp:K.speed,
+      hp:hp, hpMax:hp, dmg:dmgBase*K.dmg, face:1, frame:0, animT:0, flashT:0,
       state:'idle', stT:R(0,2), circA:R(0,Math.PI*2), circDir:rng()<0.5?1:-1,
       lungeT:0, lvx:0, lvy:0, chill:0, deadT:0
     });
@@ -1244,8 +1504,23 @@ const hints = [
   {id:45, text:'Step onto the mat to go back out.',
     trig:()=>region.interior, sat:s=>s.t>3.5},
   {id:46, text:'People out here still keep a gate. Rest, then push on.',
-    trig:()=>region.settlement&&region.depth>0&&!region.interior, sat:s=>s.t>5}
+    trig:()=>region.settlement&&region.depth>0&&!region.interior, sat:s=>s.t>5},
+  {id:47, text:'Coin buys gear. Find the forge and the goods shop.',
+    trig:()=>player.coins>=60&&!region.interior, sat:s=>player.gear.sling>0||player.gear.armor>0},
+  {id:48, text:'[\u271a] binds a wound when you carry a bandage.',
+    trig:()=>player.hp<player.hpMax*0.5&&player.bandages>0, sat:s=>player.hp>player.hpMax*0.8},
+  {id:49, text:'A chest. Stand close and press the round button.',
+    trig:()=>nearestChestDist()<40, sat:s=>{const a=contextAction();return !a||a.kind!=='chest';}},
+  {id:50, text:'Something bigger runs with them this deep.',
+    trig:()=>wolves.some(w=>w.kind==='dire'&&w.hp>0&&Math.hypot(w.x-player.x,w.y-player.y)<130),
+    sat:s=>s.t>5}
 ];
+function nearestChestDist(){
+  let d=1e9;
+  for(const c of chests){ if(c.opened)continue;
+    d=Math.min(d,Math.hypot(c.x-player.x,c.y-player.y)); }
+  return d;
+}
 function nearestDoorDist(){
   let d=1e9;
   for(const dr of doors){ if(dr.exit)continue;
@@ -1294,10 +1569,12 @@ function layoutButtons(){
     buttons.A={x:LW-26, y:LH-62, r:15, label:'A'};
     buttons.C={x:LW-60, y:LH-38, r:12, label:'C'};
     buttons.D={x:LW-26, y:LH-104, r:11, label:'D'};
+    buttons.E={x:LW-60, y:LH-72, r:13, label:'E'};
   } else {
     buttons.A={x:LW-27, y:LH-49, r:15, label:'A'};
     buttons.C={x:LW-61, y:LH-25, r:12, label:'C'};
     buttons.D={x:LW-27, y:LH-90, r:11, label:'D'};
+    buttons.E={x:LW-61, y:LH-59, r:13, label:'E'};
   }
 }
 layoutButtons();
@@ -1315,7 +1592,9 @@ cv.addEventListener('pointerdown',e=>{
     try{ const el=document.documentElement;
       if(el.requestFullscreen) el.requestFullscreen().catch(()=>{}); }catch(_){}}
   const p=toLogical(e);
+  if(ui){ uiTap(p); return; }
   for(const k in buttons){const b=buttons[k];
+    if(k==='E' && !contextAction()) continue;
     if(Math.hypot(p.x-b.x,p.y-b.y)<=b.r+5){ pressButton(k); return; }}
   if(p.x < LW*0.55 && !stick.active){
     stick.active=true; stick.id=e.pointerId;
@@ -1342,7 +1621,8 @@ cv.addEventListener('pointercancel',endPointer);
 function pressButton(k){
   if(k==='A') tryCast();
   else if(k==='C') tryDodge();
-  else if(k==='D') beep(160,0.05,0.02);
+  else if(k==='D') useBandage();
+  else if(k==='E') doContext();
 }
 
 /* ---------------- audio (minimal) --------------------------------- */
@@ -1363,12 +1643,12 @@ function beep(freq,dur,vol,type){
 let shakeAether=0;
 function tryDodge(){
   if(player.dodgeT>0) return;
-  if(player.aether < B.DODGE_COST){ shakeAether=0.4; return; }
+  if(player.aether < dodgeCost()){ shakeAether=0.4; return; }
   let vx=stick.dx, vy=stick.dy;
   if(keys['a']||keys['arrowleft'])vx=-1; if(keys['d']||keys['arrowright'])vx=1;
   if(keys['w']||keys['arrowup'])vy=-1;  if(keys['s']||keys['arrowdown'])vy=1;
   const m=Math.hypot(vx,vy)||1;
-  player.aether -= B.DODGE_COST;
+  player.aether -= dodgeCost();
   player.dodgeT = B.DODGE_IFRAMES/60;
   player.iframes = B.DODGE_IFRAMES/60;
   player.dodgeVX = vx/m*300; player.dodgeVY = vy/m*300;
@@ -1411,6 +1691,8 @@ function hurtWolf(w,dmg,fx,fy,kb){
   }
   if(w.hp<=0){
     beep(220,0.15,0.05,'sawtooth');
+    player.kills++;
+    if(bounty&&!bounty.done&&bounty.have<bounty.need) bounty.have++;
     w.flashT=0;
     for(let i=0;i<12;i++){
       const pa=R(0,Math.PI*2), sp=R(20,80);
@@ -1440,6 +1722,7 @@ function hurtPlayer(dmg){
   player.iframes = 0.5;
   beep(140,0.15,0.07,'sawtooth');
   if(player.hp<=0){
+    player.hpMax = maxHp();
     player.hp = player.hpMax; player.aether=0;
     player.coins = Math.floor(player.coins*0.75);
     player.x=RX*16+8; player.y=(RY+3)*16+8;
@@ -1449,6 +1732,8 @@ function hurtPlayer(dmg){
 /* ---------------- update -------------------------------------------- */
 let camX=0, camY=0;
 function update(dt){
+  if(toast){ toast.t+=dt; if(toast.t>2.8) toast=null; }
+  if(ui) return;
   if(fade){
     fade.t+=dt;
     if(fade.phase==='out'&&fade.t>=0.32){ applyTravel(fade.to); fade.phase='in'; fade.t=0; }
@@ -1499,6 +1784,8 @@ function update(dt){
   if(keys['w']||keys['arrowup'])vy=-1;  if(keys['s']||keys['arrowdown'])vy=1;
   if(keys[' ']){keys[' ']=false; tryDodge();}
   if(keys['e']||keys['enter']){keys['e']=false;keys['enter']=false; tryCast();}
+  if(keys['f']){keys['f']=false; doContext();}
+  if(keys['q']){keys['q']=false; useBandage();}
   const mag = Math.hypot(vx,vy);
   if(mag>1){vx/=mag;vy/=mag;}
   player.moving = mag>0.15;
@@ -1563,6 +1850,7 @@ function update(dt){
     gain += flowActive?B.AETHER_FLOW:0;
     gain *= flowMult||1;
     gain *= player.moving?1.0:B.AETHER_STILL;
+    gain *= focusMult();
     player.aether = Math.min(player.aetherMax, player.aether + gain*dt);
   }
 
@@ -1589,8 +1877,8 @@ function update(dt){
     let dead = p.t<=0 || solidAt(p.x,p.y);
     if(!dead)for(const w of wolves){
       if(w.hp<=0)continue;
-      if(Math.hypot(w.x-p.x,w.y-6-p.y)<7){
-        hurtWolf(w,B.SLING.dmg,player.x,player.y,1); dead=true; break;
+      if(Math.hypot(w.x-p.x,w.y-6-p.y)<((w.ox||9)-2)){
+        hurtWolf(w,slingDmg(),player.x,player.y,1); dead=true; break;
       }
     }
     if(dead)projectiles.splice(i,1);
@@ -1616,27 +1904,30 @@ function update(dt){
     if(playerSafe || d>150){
       w.stT-=dt;
       if(w.stT<=0){w.stT=R(1,3);w.wa=R(0,Math.PI*2);w.wm=rng()<0.6;}
-      if(w.wm){ const s=18*slow;
+      if(w.wm){ const s=18*slow*(w.sp||1);
         stepWolf(w, Math.cos(w.wa)*s*dt, Math.sin(w.wa)*s*dt); }
       w.state='idle';
     } else if(w.state==='lunge'){
       w.lungeT-=dt;
       stepWolf(w, w.lvx2*dt*slow, w.lvy2*dt*slow);
-      if(d<12){ hurtPlayer(6*(w.dmg||1)); w.state='circle'; w.cd=R(2,3.5); }
-      if(w.lungeT<=0){ w.state='circle'; w.cd=R(2,3.5); }
+      if(d<12){ hurtPlayer(6*(w.dmg||1)); w.state='circle';
+        const c1=BEASTS[w.kind||'wolf'].cd; w.cd=R(c1[0],c1[1]); }
+      if(w.lungeT<=0){ w.state='circle'; const c2=BEASTS[w.kind||'wolf'].cd; w.cd=R(c2[0],c2[1]); }
     } else {
       w.state='circle';
       w.circA = Math.atan2(w.y-player.y, w.x-player.x)
               + w.circDir*0.9*dt*slow;
       const tx = player.x+Math.cos(w.circA)*Math.min(d,44);
       const ty = player.y+Math.sin(w.circA)*Math.min(d,44);
-      const ma=Math.atan2(ty-w.y,tx-w.x), s=46*slow;
+      const ma=Math.atan2(ty-w.y,tx-w.x), s=46*slow*(w.sp||1);
       stepWolf(w, Math.cos(ma)*s*dt, Math.sin(ma)*s*dt);
-      w.cd=(w.cd||R(1,2.5))-dt;
+      const cdr=BEASTS[w.kind||'wolf'].cd;
+      w.cd=(w.cd===undefined?R(cdr[0],cdr[1]):w.cd)-dt;
       if(w.cd<=0 && d<70 && d>16){
         w.state='lunge'; w.lungeT=0.45;
         const la=Math.atan2(dy,dx);
-        w.lvx2=Math.cos(la)*150; w.lvy2=Math.sin(la)*150;
+        const ls=150*(w.sp||1);
+        w.lvx2=Math.cos(la)*ls; w.lvy2=Math.sin(la)*ls;
       }
       if(d<10) hurtPlayer(B.CONTACT_DPS*dt*(w.dmg||1));
     }
@@ -1690,6 +1981,7 @@ function update(dt){
     }
   }
 
+  for(const c of chests) if(c.opened) c.t+=dt;
   for(let i=sparks.length-1;i>=0;i--){
     sparks[i].t+=dt; if(sparks[i].t>=sparks[i].life)sparks.splice(i,1);
   }
@@ -2143,7 +2435,7 @@ function render(dt){
     g.ellipse(Math.round(x-cx),Math.round(y-cy),w,Math.max(2,w*0.45),0,0,Math.PI*2);
     g.fill(); }
   blob(player.x,player.y+1,6);
-  for(const w of wolves)if(w.hp>0)blob(w.x,w.y+1,7);
+  for(const w of wolves)if(w.hp>0)blob(w.x,w.y+1,w.kind==='dire'?10:w.kind==='shrike'?5:7);
   for(const s of spectators)blob(s.x,s.y+1,7);
   for(const t of trees)blob(t.x,t.y-1,7);
   for(const r of rocks)blob(r.x,r.y-1,r.big?7:5);
@@ -2166,6 +2458,10 @@ function render(dt){
   for(const r of rocks){
     if(r.x<cx-24||r.x>cx+LW+24||r.y<cy-32||r.y>cy+LH+32)continue;
     draws.push({y:r.y, fn:()=>drawRock(r,cx,cy)});
+  }
+  for(const c of chests){
+    if(c.x<cx-24||c.x>cx+LW+24||c.y<cy-32||c.y>cy+LH+32)continue;
+    draws.push({y:c.y, fn:()=>drawChest(c,cx,cy)});
   }
   for(const t of trees) draws.push({y:t.y, fn:()=>drawTree(t,cx,cy)});
   for(const w of wolves) draws.push({y:w.y, fn:()=>drawWolf(w,cx,cy)});
@@ -2296,6 +2592,8 @@ function render(dt){
   drawHUD();
   drawTouch();
 
+  if(ui) drawShop();
+
   if(fade){
     const a = fade.phase==='out'?Math.min(1,fade.t/0.32):Math.max(0,1-fade.t/0.32);
     g.fillStyle='rgba(0,0,0,'+a.toFixed(3)+')'; g.fillRect(0,0,LW,LH);
@@ -2317,6 +2615,29 @@ function drawCliff(c,cx,cy){
   g.fillRect(x+2+(s*5)%9, y-7, 3, 6);
   g.fillRect(x+((s*13)%13), y-3, 2, 4);
   if(s%3===0){ g.fillStyle=PAL.rockMoss; g.fillRect(x+(s*11)%11, y-12, 5, 2); }
+}
+function drawChest(c,cx,cy){
+  const x=Math.round(c.x-cx), y=Math.round(c.y-cy);
+  const open=c.opened;
+  g.fillStyle='#4a3520'; g.fillRect(x-7,y-8,14,8);
+  g.fillStyle=PAL.wood;  g.fillRect(x-6,y-7,12,6);
+  g.fillStyle=PAL.woodD; g.fillRect(x-6,y-4,12,1);
+  if(open){
+    g.fillStyle='#241a12'; g.fillRect(x-6,y-9,12,3);
+    g.fillStyle='#4a3520'; g.fillRect(x-7,y-16,14,7);
+    g.fillStyle=PAL.woodL; g.fillRect(x-6,y-15,12,5);
+  } else {
+    g.fillStyle='#4a3520'; g.fillRect(x-7,y-13,14,6);
+    g.fillStyle=PAL.woodL; g.fillRect(x-6,y-12,12,4);
+    g.fillStyle=PAL.iron;  g.fillRect(x-7,y-10,14,2);
+    g.fillStyle='#c9992a'; g.fillRect(x-1,y-10,3,4);
+    const near=Math.hypot(c.x-player.x,c.y-player.y)<26;
+    if(near){
+      g.save(); g.globalAlpha=0.35+0.25*Math.sin(performance.now()/200);
+      g.fillStyle='#ffd98a'; g.fillRect(x-8,y-17,16,17); g.restore();
+    }
+  }
+  g.fillStyle=PAL.ironL; g.fillRect(x-7,y-1,14,1);
 }
 function drawRock(r,cx,cy){
   const x=Math.round(r.x-cx), y=Math.round(r.y-cy), s=r.seed;
@@ -2772,24 +3093,28 @@ function drawWolf(w,cx,cy){
     const q=Math.min(1,w.hitT/0.09);
     g.scale(1+q*0.16, 1-q*0.13);
   }
-  g.drawImage(WOLF_SPR[w.frame],-9,-11);
+  const spr=(w.spr||WOLF_SPR)[w.frame], ox=-(w.ox||9), oy=-(w.oy||11);
+  g.drawImage(spr,ox,oy);
   if(dying){
     const a0=g.globalAlpha;
     g.globalAlpha=a0*Math.min(0.62,0.25+w.deadT*1.4);
-    g.drawImage(tintOf(WOLF_SPR[w.frame],'#2a2620'),-9,-11);
+    g.drawImage(tintOf(spr,'#2a2620'),ox,oy);
     g.globalAlpha=a0;
   } else if(w.flashT>0){                           // brief warm rim, never a white-out
     g.globalAlpha*=Math.min(0.38,w.flashT*4.2);
-    g.drawImage(tintOf(WOLF_SPR[w.frame],'#ffc0a0'),-9,-11);
+    g.drawImage(tintOf(spr,'#ffc0a0'),ox,oy);
   }
   g.restore();
+  const hw=(w.ox||9)-2;
   if(w.chill>0){
     g.fillStyle=PAL.frost;
     g.fillRect(x-6,y-13,2,2); g.fillRect(x+4,y-14,2,2); g.fillRect(x-1,y-15,2,2);
   }
   if(w.hp>0&&w.hp<w.hpMax){
-    g.fillStyle='#000'; g.fillRect(x-7,y-16,14,2);
-    g.fillStyle=PAL.hp; g.fillRect(x-7,y-16,Math.round(14*w.hp/w.hpMax),2);
+    const by=y-(w.oy||11)-5;
+    g.fillStyle='#000'; g.fillRect(x-hw,by,hw*2,2);
+    g.fillStyle= w.kind==='dire'?'#e0703c':PAL.hp;
+    g.fillRect(x-hw,by,Math.round(hw*2*w.hp/w.hpMax),2);
   }
 }
 function drawNpc(n,cx,cy){
@@ -2844,6 +3169,61 @@ function drawPlayer(cx,cy){
   }
 }
 
+/* ---------------- shop panel ------------------------------------------- */
+function uiRows(){
+  if(!ui) return [];
+  const out=[], top=22, rh=17;
+  for(let i=0;i<ui.keys.length;i++)
+    out.push({key:ui.keys[i], x:6, y:top+i*rh, w:LW-12, h:rh-2});
+  return out;
+}
+function uiCloseRect(){ return {x:LW-24, y:5, w:18, h:12}; }
+function uiTap(p){
+  const cr=uiCloseRect();
+  if(p.x>=cr.x-4&&p.x<=cr.x+cr.w+4&&p.y>=cr.y-4&&p.y<=cr.y+cr.h+4){
+    ui=null; beep(300,0.05,0.03); return;
+  }
+  for(const r of uiRows()){
+    if(p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h){ buyGood(r.key); return; }
+  }
+}
+function drawShop(){
+  g.fillStyle='rgba(8,10,14,0.9)'; g.fillRect(0,0,LW,LH);
+  g.font='7px monospace'; g.textBaseline='top';
+  g.fillStyle=PAL.hud;
+  g.fillText(ui.title.toUpperCase(), 6, 6);
+  const cs='\u25c9'+player.coins;
+  g.fillStyle=PAL.coin;
+  g.fillText(cs, LW-30-g.measureText(cs).width, 6);
+  const cr=uiCloseRect();
+  g.fillStyle='#4a2e2a'; g.fillRect(cr.x,cr.y,cr.w,cr.h);
+  g.fillStyle=PAL.hud;   g.fillText('X', cr.x+6, cr.y+2);
+  for(const r of uiRows()){
+    const gd=GOODS[r.key], st=goodState(r.key);
+    g.fillStyle = st==='owned'?'rgba(38,66,44,0.7)'
+               : st==='locked'?'rgba(30,32,38,0.7)':'rgba(40,48,62,0.85)';
+    g.fillRect(r.x,r.y,r.w,r.h);
+    g.fillStyle = st==='buy'?PAL.aether : st==='owned'?'#8ce0a0':'#4a4a44';
+    g.fillRect(r.x,r.y,2,r.h);
+    g.fillStyle = st==='locked'?'#6a6458':PAL.hud;
+    g.fillText(gd.name, r.x+6, r.y+2);
+    const tag = st==='owned'?'owned' : st==='locked'?'locked' : '\u25c9'+gd.price;
+    g.fillStyle = st==='owned'?'#8ce0a0' : st==='locked'?'#6a6458'
+               : (player.coins>=gd.price?PAL.coin:'#c0705a');
+    g.fillText(tag, r.x+r.w-5-g.measureText(tag).width, r.y+2);
+    g.fillStyle='#8b8578';
+    g.fillText(gd.desc, r.x+6, r.y+9);
+  }
+  const foot='tap to buy';
+  g.fillStyle=PAL.hudDim;
+  g.fillText(foot,(LW-g.measureText(foot).width)/2, 22+uiRows().length*17+3);
+  if(toast){
+    const w=g.measureText(toast.text).width+10;
+    g.fillStyle='rgba(0,0,0,0.85)'; g.fillRect((LW-w)/2, LH-20, w, 11);
+    g.fillStyle=PAL.hud; g.fillText(toast.text,(LW-w)/2+5, LH-18);
+  }
+}
+
 /* ---------------- HUD -------------------------------------------------- */
 function drawHUD(){
   const pad=3;
@@ -2875,6 +3255,23 @@ function drawHUD(){
     const rs='\u2691'+renown;
     g.fillText(rs, LW-g.measureText(rs).width-pad, pad+16);
   }
+  g.fillStyle=player.bandages>0?'#8ce0a0':'#5a5a52';
+  const bs='\u271a'+player.bandages;
+  g.fillText(bs, LW-g.measureText(bs).width-pad, pad+24);
+  { let px=pad, py=ay+7;
+    const gearCols={sling:'#d8d2c4',armor:'#9aa8c0',boots:'#c9a54a',focus:PAL.aether};
+    for(const k in player.gear){
+      const lv=player.gear[k]; if(!lv)continue;
+      g.fillStyle=gearCols[k];
+      for(let i=0;i<lv;i++) g.fillRect(px+i*3, py+2, 2, 3);
+      px+=lv*3+4;
+    }
+  }
+  if(bounty&&!bounty.done){
+    const bt='\u2694'+bounty.have+'/'+bounty.need;
+    g.fillStyle=bounty.have>=bounty.need?'#8ce0a0':PAL.hudDim;
+    g.fillText(bt, pad, LH-12);
+  }
   {
     let s2, col;
     if(region.interior){
@@ -2904,6 +3301,14 @@ function drawHUD(){
     g.fillText(banner.sub,(LW-w2)/2,by+14);
     g.restore();
   }
+  if(toast&&!ui){
+    const a=Math.min(1, toast.t<2.2?1:(2.8-toast.t)/0.6);
+    const w=g.measureText(toast.text).width+10;
+    g.save(); g.globalAlpha=a;
+    g.fillStyle='rgba(0,0,0,0.78)'; g.fillRect((LW-w)/2, LH-24, w, 11);
+    g.fillStyle=PAL.hud; g.fillText(toast.text,(LW-w)/2+5, LH-22);
+    g.restore();
+  }
   if(activeHint){
     const a = activeHint.leaving!==undefined?Math.max(0,activeHint.leaving*2):1;
     const txt = activeHint.h.text;
@@ -2928,19 +3333,22 @@ function drawTouch(){
     g.beginPath(); g.arc(stick.ox+stick.dx,stick.oy+stick.dy,8,0,Math.PI*2); g.fill();
     g.restore();
   }
+  const ctx=contextAction();
   for(const k in buttons){
     const b=buttons[k];
-    let on=true, ring=0;
+    let on=true, ring=0, label=b.label;
     if(k==='A'){ on = player.aether>=B.NOVA.cost && !inTown(player.x,player.y);
       ring = Math.min(1, player.aether/B.NOVA.cost); }
-    if(k==='C'){ on = player.aether>=B.DODGE_COST; }
-    if(k==='D'){ on = false; }
+    if(k==='C'){ on = player.aether>=dodgeCost(); }
+    if(k==='D'){ on = player.bandages>0 && player.hp<player.hpMax; label='\u271a'; }
+    if(k==='E'){ if(!ctx) continue; on=true; label=ctx.label; }
     g.save();
     g.globalAlpha = on?0.55:0.22;
     g.fillStyle = '#101418';
     g.beginPath(); g.arc(b.x,b.y,b.r,0,Math.PI*2); g.fill();
-    g.strokeStyle = on?PAL.aether:'#555';
+    g.strokeStyle = k==='E'?'#ffd98a' : (on?PAL.aether:'#555');
     g.lineWidth=1.5;
+    if(k==='E'&&Math.floor(performance.now()/380)%2) g.strokeStyle='#fff4d0';
     if(k==='A'&&on&&Math.floor(performance.now()/350)%2)
       g.strokeStyle=PAL.aetherHi;
     g.beginPath(); g.arc(b.x,b.y,b.r,0,Math.PI*2); g.stroke();
@@ -2949,9 +3357,10 @@ function drawTouch(){
       g.beginPath(); g.arc(b.x,b.y,b.r+3,-Math.PI/2,-Math.PI/2+ring*Math.PI*2); g.stroke();
     }
     g.globalAlpha = on?0.9:0.35;
-    g.fillStyle=PAL.hud; g.font='8px monospace';
-    const lw=g.measureText(b.label).width;
-    g.fillText(b.label, b.x-lw/2, b.y-4);
+    g.fillStyle=PAL.hud;
+    g.font = (k==='E'?'6px':'8px')+' monospace';
+    const lw=g.measureText(label).width;
+    g.fillText(label, b.x-lw/2, b.y-4);
     g.restore();
   }
 }
